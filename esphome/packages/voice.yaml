@@ -82,6 +82,8 @@ media_player:
               voice_assistant.is_running:
           then:
             - script.execute: screen_wake
+    on_state:
+      - script.execute: sync_volume
     on_idle:
       # Einde van een mededeling buiten een gesprek: wake word weer aan.
       - if:
@@ -172,6 +174,8 @@ voice_assistant:
     - script.execute: start_wake_word
     - script.execute: set_idle_or_mute_phase
     - script.execute: update_ui
+    - delay: 5s
+    - script.execute: fetch_forecast
   on_client_disconnected:
     - script.execute: stop_wake_word
     - lambda: id(va_phase) = ${phase_not_ready};
@@ -180,13 +184,18 @@ voice_assistant:
     - script.execute: update_timer
   on_timer_updated:
     - script.execute: update_timer
+  # ESPHome meldt "gestopt"/"klaar" terwijl de timer nog in de lijst staat;
+  # even wachten tot hij eruit is, anders blijft het scherm op 00:00 staan.
   on_timer_cancelled:
+    - delay: 100ms
     - script.execute: update_timer
   on_timer_tick:
     - script.execute: update_timer
   on_timer_finished:
     - lambda: id(finished_timer_name) = timer.name;
     - switch.turn_on: timer_ringing
+    - delay: 100ms
+    - script.execute: update_timer
 
 switch:
   - platform: template

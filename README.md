@@ -10,10 +10,14 @@ met de Home Assistant Voice Preview Edition, maar dan met een scherm.
   of *"Hey Mycroft"*, te kiezen in Home Assistant.
 - Spraakopdrachten via Assist; het antwoord komt uit de speaker en staat op het
   scherm.
-- Rond scherm met het weer, klok en datum (in het Nederlands), een gekleurde
-  ring per status (blauw = luisteren, oranje = denken, groen = antwoord,
-  rood = fout) en een microfoonknop om zonder wake word te praten. Lange
-  antwoorden scrollen vanzelf.
+- Rond scherm met drie pagina's om tussen te swipen:
+  **Bediening** (microfoon, scherm uit, helderheid) ← **Home** (weer, klok,
+  datum, microfoonknop) → **Weer** (groot weericoon, temperatuur,
+  luchtvochtigheid, wind en de verwachting voor 4 dagen, met kleuren per
+  weertype).
+- **Volumewiel**: draai met je vinger langs de rand van het scherm.
+- Een gekleurde ring per status (blauw "ademend" = luisteren, oranje draaiend
+  = denken, groen = antwoord, rood = fout). Lange antwoorden scrollen vanzelf.
 - Timers ("zet een timer van 5 minuten"): grote aftelklok met de naam van de
   timer, de eindtijd en een oranje voortgangsring. Gaat hij af, zeg dan
   **"stop"** (of het wake word) of tik op het scherm.
@@ -147,6 +151,8 @@ Daar kies je ook het wake word en de Assist-pipeline.
 | Actie | Wat er gebeurt |
 |---|---|
 | Wake word zeggen | Begint te luisteren (ring wordt blauw) |
+| Swipe naar links / rechts | Pagina Weer / pagina Bediening |
+| Vinger langs de rand draaien | Volume harder of zachter |
 | Tik op de **microfoonknop** op het scherm | Praten zonder wake word (staat de microfoon uit, dan gaat hij weer aan) |
 | Tik ergens op het scherm | Scherm aan / timer-alarm stoppen |
 | **"Stop"** zeggen terwijl een timer afgaat | Alarm stoppen (het wake word werkt ook) |
@@ -175,7 +181,11 @@ Anthropic) bij *Instructies* iets als:
 
 **Het weer.** Het scherm toont het weer van `weather.forecast_home` (de
 standaard Met.no-integratie). Heet jouw weer-entiteit anders, pas dan
-`weather_entity` aan bij `substitutions:`. Wil je dat de assistent het weer
+`weather_entity` aan bij `substitutions:`. Voor de **verwachting** op de
+weerpagina moet het apparaat een actie in Home Assistant mogen uitvoeren: ga
+naar *Instellingen → Apparaten & diensten → ESPHome*, klik bij dit apparaat
+op **Configureren** en zet **"Sta het apparaat toe om Home Assistant-acties
+uit te voeren"** aan. Wil je dat de assistent het weer
 ook kan *vertellen*:
 
 1. *Instellingen → Spraakassistenten → Entiteiten blootstellen*: zet je

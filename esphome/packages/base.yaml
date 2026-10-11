@@ -15,6 +15,11 @@ esphome:
   on_boot:
     - priority: -100
       then:
+        - lambda: id(ui_ready) = true;
+        - lvgl.slider.update:
+            id: brightness_slider
+            value: !lambda return id(screen_brightness).state;
+        - script.execute: sync_volume
         - script.execute: update_clock
         - script.execute: update_ui
         - script.execute: screen_wake
@@ -105,6 +110,13 @@ number:
     restore_value: true
     on_value:
       - script.execute: screen_wake
+      - if:
+          condition:
+            lambda: return id(ui_ready);
+          then:
+            - lvgl.slider.update:
+                id: brightness_slider
+                value: !lambda return x;
   - platform: template
     id: screen_dim_brightness
     name: Helderheid in rust
@@ -196,3 +208,9 @@ script:
             - light.turn_off: backlight
             - delay: 500ms
             - lvgl.pause:
+      # Na het dimmen terug naar de Home-pagina.
+      - lvgl.tileview.select:
+          id: tiles
+          column: 1
+          row: 0
+          animated: false

@@ -10,6 +10,10 @@
 #   3. weather_entity (bij substitutions): alleen als je weer-entiteit in
 #      Home Assistant niet weather.forecast_home heet
 #
+# Voor de weersverwachting: zet in Home Assistant bij dit apparaat
+# (Instellingen > Apparaten & diensten > ESPHome > apparaat > Configureren)
+# "Sta het apparaat toe om Home Assistant-acties uit te voeren" aan.
+#
 # Vereist ESPHome 2026.9 of nieuwer.
 # Bron: https://github.com/GwnQuin/Waveshare-esp32-homeassistent
 #
@@ -18,10 +22,9 @@
 # Audio    : I2S MEMS-microfoon + PCM5101 DAC met speaker
 # Overig   : TCA9554 IO-expander (reset scherm/touch)
 #
-# Scherm:  rust = weer, klok + datum; timer = aftelklok met oranje ring;
-#          blauw = luisteren, oranje = denken, groen = antwoord, rood = fout.
-#          Tik op de microfoonknop om te praten. Gaat een timer af, zeg dan
-#          "stop" (of het wake word) of tik op het scherm.
+# Scherm:  swipe naar links = weer + verwachting, naar rechts = bediening.
+#          Draai langs de rand = volume. Tik op de microfoonknop om te praten.
+#          Gaat een timer af, zeg dan "stop" of tik op het scherm.
 # =============================================================================
 
 substitutions:
@@ -39,12 +42,14 @@ substitutions:
   weather_entity: weather.forecast_home
   color_idle: "0x263238"
   color_listening: "0x2196F3"
+  color_listening_dark: "0x1565C0"
   color_thinking: "0xFF9800"
   color_replying: "0x4CAF50"
   color_error: "0xE53935"
   color_muted: "0x6D1B1B"
   color_text: "0xFFFFFF"
   color_text_dim: "0x9E9E9E"
+  color_card: "0x1C2733"
 
 esphome:
   name: ${name}
@@ -56,6 +61,11 @@ esphome:
   on_boot:
     - priority: -100
       then:
+        - lambda: id(ui_ready) = true;
+        - lvgl.slider.update:
+            id: brightness_slider
+            value: !lambda return id(screen_brightness).state;
+        - script.execute: sync_volume
         - script.execute: update_clock
         - script.execute: update_ui
         - script.execute: screen_wake
@@ -127,6 +137,11 @@ globals:
   - id: finished_timer_name
     type: std::string
     restore_value: false
+  # LVGL is klaar (gezet in on_boot); daarvoor geen schermupdates.
+  - id: ui_ready
+    type: bool
+    restore_value: false
+    initial_value: "false"
   - id: timer_active
     type: bool
     restore_value: false
@@ -152,11 +167,23 @@ globals:
     type: bool
     restore_value: false
     initial_value: "false"
-  - id: weather_icon
-    type: std::string
+  - id: weather_tint
+    type: uint32_t
     restore_value: false
-  - id: weather_text
-    type: std::string
+    initial_value: "0x101820"
+  # Weersverwachting (max. 4 dagen), gevuld door fetch_forecast
+  - id: fc_count
+    type: int
+    restore_value: false
+    initial_value: "0"
+  - id: fc_day
+    type: std::array<std::string, 4>
+    restore_value: false
+  - id: fc_cond
+    type: std::array<std::string, 4>
+    restore_value: false
+  - id: fc_temp
+    type: std::array<std::string, 4>
     restore_value: false
 
 i2c:
@@ -270,6 +297,8 @@ media_player:
               voice_assistant.is_running:
           then:
             - script.execute: screen_wake
+    on_state:
+      - script.execute: sync_volume
     on_idle:
       # Einde van een mededeling buiten een gesprek: wake word weer aan.
       - if:
@@ -388,6 +417,8 @@ voice_assistant:
     - script.execute: start_wake_word
     - script.execute: set_idle_or_mute_phase
     - script.execute: update_ui
+    - delay: 5s
+    - script.execute: fetch_forecast
   on_client_disconnected:
     - script.execute: stop_wake_word
     - lambda: id(va_phase) = ${phase_not_ready};
@@ -396,13 +427,18 @@ voice_assistant:
     - script.execute: update_timer
   on_timer_updated:
     - script.execute: update_timer
+  # ESPHome meldt "gestopt"/"klaar" terwijl de timer nog in de lijst staat;
+  # even wachten tot hij eruit is, anders blijft het scherm op 00:00 staan.
   on_timer_cancelled:
+    - delay: 100ms
     - script.execute: update_timer
   on_timer_tick:
     - script.execute: update_timer
   on_timer_finished:
     - lambda: id(finished_timer_name) = timer.name;
     - switch.turn_on: timer_ringing
+    - delay: 100ms
+    - script.execute: update_timer
 
 # --- Achtergrondverlichting (GPIO5 op alle varianten) ---
 output:
@@ -434,6 +470,13 @@ number:
     restore_value: true
     on_value:
       - script.execute: screen_wake
+      - if:
+          condition:
+            lambda: return id(ui_ready);
+          then:
+            - lvgl.slider.update:
+                id: brightness_slider
+                value: !lambda return x;
   - platform: template
     id: screen_dim_brightness
     name: Helderheid in rust
@@ -568,6 +611,20 @@ sensor:
     internal: true
     on_value:
       - script.execute: update_weather
+  - platform: homeassistant
+    id: weather_humidity
+    entity_id: ${weather_entity}
+    attribute: humidity
+    internal: true
+    on_value:
+      - script.execute: update_weather
+  - platform: homeassistant
+    id: weather_wind
+    entity_id: ${weather_entity}
+    attribute: wind_speed
+    internal: true
+    on_value:
+      - script.execute: update_weather
 
 # --- Weer uit Home Assistant ---
 text_sensor:
@@ -577,6 +634,16 @@ text_sensor:
     internal: true
     on_value:
       - script.execute: update_weather
+  - platform: homeassistant
+    id: weather_wind_unit
+    entity_id: ${weather_entity}
+    attribute: wind_speed_unit
+    internal: true
+
+interval:
+  - interval: 30min
+    then:
+      - script.execute: fetch_forecast
 
 font:
   - file:
@@ -586,6 +653,13 @@ font:
     id: font_clock
     size: 88
     glyphs: "0123456789:-"
+  - file:
+      type: gfonts
+      family: Figtree
+      weight: 600
+    id: font_mid
+    size: 56
+    glyphs: "0123456789:-°%"
   - file:
       type: gfonts
       family: Figtree
@@ -604,16 +678,20 @@ font:
   # Material Symbols, codepoints uit MaterialSymbolsOutlined.codepoints
   - file: gfonts://Material+Symbols+Outlined
     id: font_icons
-    size: 28
+    size: 26
     glyphs:
       - "\U0000e31d" # mic
       - "\U0000e02b" # mic_off
       - "\U0000e648" # wifi_off
       - "\U0000e16f" # link_off
+      - "\U0000e798" # water_drop
+      - "\U0000efd8" # air
+      - "\U0000e1ad" # brightness_low
+      - "\U0000e1ac" # brightness_high
   - file: gfonts://Material+Symbols+Outlined
     id: font_icons_weather
     size: 36
-    glyphs:
+    glyphs: &weather_glyphs
       - "\U0000f157" # clear_day
       - "\U0000f159" # clear_night
       - "\U0000f172" # partly_cloudy_day
@@ -628,11 +706,19 @@ font:
       - "\U0000efd8" # air
       - "\U0000f083" # warning
   - file: gfonts://Material+Symbols+Outlined
+    id: font_icons_xl
+    size: 84
+    glyphs: *weather_glyphs
+  - file: gfonts://Material+Symbols+Outlined
     id: font_icons_big
     size: 40
     glyphs:
       - "\U0000e31d" # mic
       - "\U0000e02b" # mic_off
+      - "\U0000e51c" # dark_mode
+      - "\U0000e050" # volume_up
+      - "\U0000e04d" # volume_down
+      - "\U0000e04f" # volume_off
 
 lvgl:
   id: lvgl_ui
@@ -648,6 +734,582 @@ lvgl:
       bg_color: 0x000000
       scrollable: false
       widgets:
+        # ================= Pagina's (swipen) =================
+        - tileview:
+            id: tiles
+            align: CENTER
+            width: 360
+            height: 360
+            bg_opa: TRANSP
+            scrollbar_mode: "OFF"
+            on_value:
+              - script.execute: screen_wake
+            tiles:
+              # ---------- Home (eerste = startpagina) ----------
+              - id: tile_home
+                row: 0
+                column: 1
+                dir: HOR
+                bg_opa: COVER
+                bg_color: 0x0D1B2A
+                bg_grad_color: 0x000000
+                bg_grad_dir: VER
+                scrollable: false
+                widgets:
+                  - obj:
+                      id: weather_row
+                      align: TOP_MID
+                      y: 56
+                      width: SIZE_CONTENT
+                      height: SIZE_CONTENT
+                      bg_opa: TRANSP
+                      border_width: 0
+                      pad_all: 0
+                      scrollable: false
+                      clickable: false
+                      hidden: true
+                      layout:
+                        type: flex
+                        pad_column: 6
+                        flex_flow: ROW
+                        flex_align_cross: CENTER
+                      widgets:
+                        - label:
+                            id: lbl_weather_icon
+                            text_font: font_icons_weather
+                            text: ""
+                        - label:
+                            id: lbl_weather_temp
+                            text_font: font_title
+                            text: ""
+                        - label:
+                            id: lbl_weather_cond
+                            text_font: font_small
+                            text_color: ${color_text_dim}
+                            text: ""
+                  - label:
+                      id: lbl_notice
+                      align: TOP_MID
+                      y: 64
+                      text_font: font_title
+                      text_color: ${color_text_dim}
+                      text: ""
+                      hidden: true
+
+                  # Klok
+                  - label:
+                      id: lbl_time
+                      align: CENTER
+                      y: -6
+                      text_font: font_clock
+                      text: "--:--"
+                  - label:
+                      id: lbl_date
+                      align: CENTER
+                      y: 62
+                      text_font: font_text
+                      text_color: ${color_text_dim}
+                      text: ""
+
+                  # Timer (vervangt weer, klok en datum zolang er een timer loopt)
+                  - label:
+                      id: lbl_timer_name
+                      align: TOP_MID
+                      y: 64
+                      width: 240
+                      text_align: CENTER
+                      long_mode: DOT
+                      text_font: font_title
+                      text_color: ${color_thinking}
+                      text: ""
+                      hidden: true
+                  - label:
+                      id: lbl_timer_count
+                      align: CENTER
+                      y: -6
+                      text_font: font_clock
+                      text_color: ${color_thinking}
+                      text: ""
+                      hidden: true
+                  - label:
+                      id: lbl_timer_end
+                      align: CENTER
+                      y: 62
+                      text_font: font_text
+                      text_color: ${color_text_dim}
+                      text: ""
+                      hidden: true
+
+                  # Microfoonknop: tikken om te praten
+                  - button:
+                      id: btn_talk
+                      align: BOTTOM_MID
+                      y: -26
+                      width: 68
+                      height: 68
+                      radius: 34
+                      bg_color: ${color_listening}
+                      bg_grad_color: ${color_listening_dark}
+                      bg_grad_dir: VER
+                      shadow_width: 18
+                      shadow_color: ${color_listening}
+                      shadow_opa: 40%
+                      on_click:
+                        - script.execute: talk_pressed
+                      widgets:
+                        - label:
+                            id: lbl_talk_icon
+                            align: CENTER
+                            text_font: font_icons_big
+                            text: "\U0000e31d"
+
+                  # Pagina-stipjes
+                  - obj:
+                      align: BOTTOM_MID
+                      y: -6
+                      width: SIZE_CONTENT
+                      height: SIZE_CONTENT
+                      bg_opa: TRANSP
+                      border_width: 0
+                      pad_all: 0
+                      scrollable: false
+                      clickable: false
+                      layout:
+                        type: flex
+                        pad_column: 6
+                        flex_flow: ROW
+                      widgets:
+                        - obj: &dot_off
+                            width: 7
+                            height: 7
+                            radius: 4
+                            border_width: 0
+                            bg_color: 0x455A64
+                            clickable: false
+                            scrollable: false
+                        - obj: &dot_on
+                            width: 7
+                            height: 7
+                            radius: 4
+                            border_width: 0
+                            bg_color: 0xFFFFFF
+                            clickable: false
+                            scrollable: false
+                        - obj: *dot_off
+
+              # ---------- Bediening (links van Home) ----------
+              - id: tile_controls
+                row: 0
+                column: 0
+                dir: RIGHT
+                bg_opa: COVER
+                bg_color: 0x1A1A2E
+                bg_grad_color: 0x000000
+                bg_grad_dir: VER
+                scrollable: false
+                widgets:
+                  - label:
+                      align: TOP_MID
+                      y: 58
+                      text_font: font_title
+                      text: "Bediening"
+                  - button:
+                      id: btn_ctl_mic
+                      align: CENTER
+                      x: -62
+                      y: -18
+                      width: 92
+                      height: 92
+                      radius: 46
+                      bg_color: ${color_card}
+                      shadow_width: 0
+                      on_click:
+                        - switch.toggle: mute
+                      widgets:
+                        - label:
+                            id: lbl_ctl_mic_icon
+                            align: CENTER
+                            text_font: font_icons_big
+                            text: "\U0000e31d"
+                  - label:
+                      id: lbl_ctl_mic
+                      align: CENTER
+                      x: -62
+                      y: 46
+                      text_font: font_small
+                      text_color: ${color_text_dim}
+                      text: "Microfoon aan"
+                  - button:
+                      id: btn_ctl_screen
+                      align: CENTER
+                      x: 62
+                      y: -18
+                      width: 92
+                      height: 92
+                      radius: 46
+                      bg_color: ${color_card}
+                      shadow_width: 0
+                      on_click:
+                        - script.execute: screen_off
+                      widgets:
+                        - label:
+                            align: CENTER
+                            text_font: font_icons_big
+                            text: "\U0000e51c"
+                  - label:
+                      align: CENTER
+                      x: 62
+                      y: 46
+                      text_font: font_small
+                      text_color: ${color_text_dim}
+                      text: "Scherm uit"
+                  # Helderheid
+                  - obj:
+                      align: CENTER
+                      y: 98
+                      width: SIZE_CONTENT
+                      height: SIZE_CONTENT
+                      bg_opa: TRANSP
+                      border_width: 0
+                      pad_all: 0
+                      scrollable: false
+                      clickable: false
+                      layout:
+                        type: flex
+                        pad_column: 10
+                        flex_flow: ROW
+                        flex_align_cross: CENTER
+                      widgets:
+                        - label:
+                            text_font: font_icons
+                            text_color: ${color_text_dim}
+                            text: "\U0000e1ad"
+                        - slider:
+                            id: brightness_slider
+                            width: 160
+                            height: 12
+                            min_value: 10
+                            max_value: 100
+                            value: 80
+                            bg_color: 0x37474F
+                            indicator:
+                              bg_color: ${color_thinking}
+                            knob:
+                              bg_color: 0xFFFFFF
+                            on_change:
+                              - number.set:
+                                  id: screen_brightness
+                                  value: !lambda return x;
+                        - label:
+                            text_font: font_icons
+                            text_color: ${color_text_dim}
+                            text: "\U0000e1ac"
+                  - obj:
+                      align: BOTTOM_MID
+                      y: -6
+                      width: SIZE_CONTENT
+                      height: SIZE_CONTENT
+                      bg_opa: TRANSP
+                      border_width: 0
+                      pad_all: 0
+                      scrollable: false
+                      clickable: false
+                      layout:
+                        type: flex
+                        pad_column: 6
+                        flex_flow: ROW
+                      widgets:
+                        - obj: *dot_on
+                        - obj: *dot_off
+                        - obj: *dot_off
+
+              # ---------- Weer (rechts van Home) ----------
+              - id: tile_weather
+                row: 0
+                column: 2
+                dir: LEFT
+                bg_opa: COVER
+                bg_color: 0x101820
+                bg_grad_color: 0x000000
+                bg_grad_dir: VER
+                scrollable: false
+                widgets:
+                  - obj:
+                      align: TOP_MID
+                      y: 50
+                      width: SIZE_CONTENT
+                      height: SIZE_CONTENT
+                      bg_opa: TRANSP
+                      border_width: 0
+                      pad_all: 0
+                      scrollable: false
+                      clickable: false
+                      layout:
+                        type: flex
+                        pad_column: 8
+                        flex_flow: ROW
+                        flex_align_cross: CENTER
+                      widgets:
+                        - label:
+                            id: wx_icon
+                            text_font: font_icons_xl
+                            text_color: 0xB0BEC5
+                            text: "\U0000f15c"
+                        - label:
+                            id: wx_temp
+                            text_font: font_mid
+                            text: "--"
+                  - label:
+                      id: wx_cond
+                      align: TOP_MID
+                      y: 142
+                      text_font: font_title
+                      text: "Weer laden..."
+                  # Luchtvochtigheid en wind
+                  - obj:
+                      align: TOP_MID
+                      y: 178
+                      width: SIZE_CONTENT
+                      height: SIZE_CONTENT
+                      bg_opa: TRANSP
+                      border_width: 0
+                      pad_all: 0
+                      scrollable: false
+                      clickable: false
+                      layout:
+                        type: flex
+                        pad_column: 4
+                        flex_flow: ROW
+                        flex_align_cross: CENTER
+                      widgets:
+                        - label:
+                            text_font: font_icons
+                            text_color: 0x4FC3F7
+                            text: "\U0000e798"
+                        - label:
+                            id: wx_humidity
+                            text_font: font_small
+                            text: "--"
+                        - obj:
+                            width: 14
+                            height: 1
+                            bg_opa: TRANSP
+                            border_width: 0
+                            clickable: false
+                        - label:
+                            text_font: font_icons
+                            text_color: 0x80CBC4
+                            text: "\U0000efd8"
+                        - label:
+                            id: wx_wind
+                            text_font: font_small
+                            text: "--"
+                  # Verwachting: 4 kolommen (dag, icoon, max/min)
+                  - obj:
+                      align: TOP_MID
+                      y: 218
+                      width: SIZE_CONTENT
+                      height: SIZE_CONTENT
+                      bg_opa: TRANSP
+                      border_width: 0
+                      pad_all: 0
+                      scrollable: false
+                      clickable: false
+                      layout:
+                        type: flex
+                        pad_column: 6
+                        flex_flow: ROW
+                      widgets:
+                        - obj:
+                            id: fc_col_0
+                            width: 58
+                            height: SIZE_CONTENT
+                            bg_color: ${color_card}
+                            bg_opa: 60%
+                            radius: 14
+                            border_width: 0
+                            pad_top: 6
+                            pad_bottom: 6
+                            pad_left: 0
+                            pad_right: 0
+                            scrollable: false
+                            clickable: false
+                            hidden: true
+                            layout:
+                              type: flex
+                              pad_row: 2
+                              flex_flow: COLUMN
+                              flex_align_cross: CENTER
+                            widgets:
+                              - label:
+                                  id: fc_day_0
+                                  text_font: font_small
+                                  text_color: ${color_text_dim}
+                                  text: ""
+                              - label:
+                                  id: fc_icon_0
+                                  text_font: font_icons_weather
+                                  text: ""
+                              - label:
+                                  id: fc_temp_0
+                                  text_font: font_small
+                                  text: ""
+                        - obj:
+                            id: fc_col_1
+                            width: 58
+                            height: SIZE_CONTENT
+                            bg_color: ${color_card}
+                            bg_opa: 60%
+                            radius: 14
+                            border_width: 0
+                            pad_top: 6
+                            pad_bottom: 6
+                            pad_left: 0
+                            pad_right: 0
+                            scrollable: false
+                            clickable: false
+                            hidden: true
+                            layout:
+                              type: flex
+                              pad_row: 2
+                              flex_flow: COLUMN
+                              flex_align_cross: CENTER
+                            widgets:
+                              - label:
+                                  id: fc_day_1
+                                  text_font: font_small
+                                  text_color: ${color_text_dim}
+                                  text: ""
+                              - label:
+                                  id: fc_icon_1
+                                  text_font: font_icons_weather
+                                  text: ""
+                              - label:
+                                  id: fc_temp_1
+                                  text_font: font_small
+                                  text: ""
+                        - obj:
+                            id: fc_col_2
+                            width: 58
+                            height: SIZE_CONTENT
+                            bg_color: ${color_card}
+                            bg_opa: 60%
+                            radius: 14
+                            border_width: 0
+                            pad_top: 6
+                            pad_bottom: 6
+                            pad_left: 0
+                            pad_right: 0
+                            scrollable: false
+                            clickable: false
+                            hidden: true
+                            layout:
+                              type: flex
+                              pad_row: 2
+                              flex_flow: COLUMN
+                              flex_align_cross: CENTER
+                            widgets:
+                              - label:
+                                  id: fc_day_2
+                                  text_font: font_small
+                                  text_color: ${color_text_dim}
+                                  text: ""
+                              - label:
+                                  id: fc_icon_2
+                                  text_font: font_icons_weather
+                                  text: ""
+                              - label:
+                                  id: fc_temp_2
+                                  text_font: font_small
+                                  text: ""
+                        - obj:
+                            id: fc_col_3
+                            width: 58
+                            height: SIZE_CONTENT
+                            bg_color: ${color_card}
+                            bg_opa: 60%
+                            radius: 14
+                            border_width: 0
+                            pad_top: 6
+                            pad_bottom: 6
+                            pad_left: 0
+                            pad_right: 0
+                            scrollable: false
+                            clickable: false
+                            hidden: true
+                            layout:
+                              type: flex
+                              pad_row: 2
+                              flex_flow: COLUMN
+                              flex_align_cross: CENTER
+                            widgets:
+                              - label:
+                                  id: fc_day_3
+                                  text_font: font_small
+                                  text_color: ${color_text_dim}
+                                  text: ""
+                              - label:
+                                  id: fc_icon_3
+                                  text_font: font_icons_weather
+                                  text: ""
+                              - label:
+                                  id: fc_temp_3
+                                  text_font: font_small
+                                  text: ""
+                  - obj:
+                      align: BOTTOM_MID
+                      y: -6
+                      width: SIZE_CONTENT
+                      height: SIZE_CONTENT
+                      bg_opa: TRANSP
+                      border_width: 0
+                      pad_all: 0
+                      scrollable: false
+                      clickable: false
+                      layout:
+                        type: flex
+                        pad_column: 6
+                        flex_flow: ROW
+                      widgets:
+                        - obj: *dot_off
+                        - obj: *dot_off
+                        - obj: *dot_on
+
+        # ================= Gesprek en alarm (over de pagina's heen) =================
+        - obj:
+            id: conv_view
+            align: CENTER
+            width: 360
+            height: 360
+            radius: 180
+            bg_color: 0x000000
+            bg_grad_color: 0x0A1420
+            bg_grad_dir: VER
+            border_width: 0
+            pad_all: 0
+            scrollable: false
+            clickable: false
+            hidden: true
+            widgets:
+              - label:
+                  id: lbl_status
+                  align: TOP_MID
+                  y: 66
+                  text_font: font_title
+                  text: ""
+              # Lange antwoorden scrollen vanzelf heen en weer.
+              - label:
+                  id: lbl_text
+                  align: TOP_MID
+                  y: 108
+                  width: 270
+                  height: 180
+                  text_font: font_text
+                  text_align: CENTER
+                  long_mode: SCROLL
+                  text: ""
+
+        # ================= Altijd zichtbaar =================
         # Gekleurde ring langs de rand van het ronde scherm
         - obj:
             id: ring
@@ -702,7 +1364,7 @@ lvgl:
         - obj:
             id: status_row
             align: TOP_MID
-            y: 18
+            y: 16
             width: SIZE_CONTENT
             height: SIZE_CONTENT
             bg_opa: TRANSP
@@ -728,152 +1390,80 @@ lvgl:
                   text: ""
                   hidden: true
 
-        # ---------------- Rust en timer ----------------
-        - obj:
-            id: idle_view
+        # ================= Volumewiel langs de rand =================
+        # Alleen de ring zelf reageert op aanraking (adv_hittest), dus swipen
+        # en knoppen in het midden blijven gewoon werken. Onderaan is het wiel
+        # open, daar zit de microfoonknop.
+        - arc:
+            id: volume_arc
             align: CENTER
-            width: 360
-            height: 360
-            bg_opa: TRANSP
-            border_width: 0
+            width: 336
+            height: 336
+            start_angle: 135
+            end_angle: 45
+            min_value: 0
+            max_value: 100
+            value: 50
+            adjustable: true
+            change_rate: 1080
+            adv_hittest: true
             pad_all: 0
-            scrollable: false
-            clickable: false
-            widgets:
-              - obj:
-                  id: weather_row
-                  align: TOP_MID
-                  y: 56
-                  width: SIZE_CONTENT
-                  height: SIZE_CONTENT
-                  bg_opa: TRANSP
-                  border_width: 0
-                  pad_all: 0
-                  scrollable: false
-                  clickable: false
-                  hidden: true
-                  layout:
-                    type: flex
-                    pad_column: 6
-                    flex_flow: ROW
-                    flex_align_cross: CENTER
-                  widgets:
-                    - label:
-                        id: lbl_weather_icon
-                        text_font: font_icons_weather
-                        text_color: ${color_thinking}
-                        text: ""
-                    - label:
-                        id: lbl_weather_temp
-                        text_font: font_title
-                        text: ""
-                    - label:
-                        id: lbl_weather_cond
-                        text_font: font_small
-                        text_color: ${color_text_dim}
-                        text: ""
-              - label:
-                  id: lbl_notice
-                  align: TOP_MID
-                  y: 64
-                  text_font: font_title
-                  text_color: ${color_text_dim}
-                  text: ""
-                  hidden: true
-
-              # Klok
-              - label:
-                  id: lbl_time
-                  align: CENTER
-                  y: -6
-                  text_font: font_clock
-                  text: "--:--"
-              - label:
-                  id: lbl_date
-                  align: CENTER
-                  y: 62
-                  text_font: font_text
-                  text_color: ${color_text_dim}
-                  text: ""
-
-              # Timer (vervangt weer, klok en datum zolang er een timer loopt)
-              - label:
-                  id: lbl_timer_name
-                  align: TOP_MID
-                  y: 64
-                  width: 240
-                  text_align: CENTER
-                  long_mode: DOT
-                  text_font: font_title
-                  text_color: ${color_thinking}
-                  text: ""
-                  hidden: true
-              - label:
-                  id: lbl_timer_count
-                  align: CENTER
-                  y: -6
-                  text_font: font_clock
-                  text_color: ${color_thinking}
-                  text: ""
-                  hidden: true
-              - label:
-                  id: lbl_timer_end
-                  align: CENTER
-                  y: 62
-                  text_font: font_text
-                  text_color: ${color_text_dim}
-                  text: ""
-                  hidden: true
-
-              # Microfoonknop: tikken om te praten
-              - button:
-                  id: btn_talk
-                  align: BOTTOM_MID
-                  y: -22
-                  width: 68
-                  height: 68
-                  radius: 34
-                  bg_color: ${color_listening}
-                  shadow_width: 0
-                  on_click:
-                    - script.execute: talk_pressed
-                  widgets:
-                    - label:
-                        id: lbl_talk_icon
-                        align: CENTER
-                        text_font: font_icons_big
-                        text: "\U0000e31d"
-
-        # ---------------- Gesprek en alarm ----------------
+            arc_width: 22
+            arc_color: 0x37474F
+            arc_opa: TRANSP
+            pressed:
+              arc_opa: 70%
+            indicator:
+              arc_width: 22
+              arc_color: ${color_listening}
+              arc_opa: TRANSP
+              pressed:
+                arc_opa: COVER
+            knob:
+              bg_opa: TRANSP
+              pad_all: 2
+              pressed:
+                bg_opa: COVER
+                bg_color: 0xFFFFFF
+            on_press:
+              - script.execute: screen_wake
+              - script.stop: hide_volume
+              - lvgl.widget.show: vol_overlay
+            on_change:
+              - media_player.volume_set:
+                  id: speaker_media_player
+                  volume: !lambda return x / 100.0f;
+              - script.execute: update_volume_overlay
+            on_release:
+              - script.execute: hide_volume
         - obj:
-            id: conv_view
+            id: vol_overlay
             align: CENTER
-            width: 360
-            height: 360
-            bg_opa: TRANSP
-            border_width: 0
+            width: 180
+            height: 180
+            radius: 90
+            bg_color: 0x000000
+            bg_opa: 90%
+            border_width: 2
+            border_color: ${color_listening}
             pad_all: 0
             scrollable: false
             clickable: false
             hidden: true
             widgets:
               - label:
-                  id: lbl_status
-                  align: TOP_MID
-                  y: 66
-                  text_font: font_title
-                  text: ""
-              # Lange antwoorden scrollen vanzelf heen en weer.
+                  id: lbl_vol_icon
+                  align: CENTER
+                  y: -34
+                  text_font: font_icons_big
+                  text_color: ${color_listening}
+                  text: "\U0000e050"
               - label:
-                  id: lbl_text
-                  align: TOP_MID
-                  y: 108
-                  width: 270
-                  height: 180
-                  text_font: font_text
-                  text_align: CENTER
-                  long_mode: SCROLL
-                  text: ""
+                  id: lbl_vol
+                  align: CENTER
+                  y: 18
+                  text_font: font_mid
+                  text: "50%"
 
 script:
   # Scherm aan op volle helderheid en (opnieuw) de dim-timer starten.
@@ -903,6 +1493,12 @@ script:
             - light.turn_off: backlight
             - delay: 500ms
             - lvgl.pause:
+      # Na het dimmen terug naar de Home-pagina.
+      - lvgl.tileview.select:
+          id: tiles
+          column: 1
+          row: 0
+          animated: false
   - id: start_wake_word
     then:
       - if:
@@ -995,6 +1591,53 @@ script:
           then:
             - switch.turn_off: timer_ringing
 
+  # Knop "Scherm uit" op de pagina Bediening; aanraken zet hem weer aan.
+  - id: screen_off
+    then:
+      - script.stop: screen_wake
+      - light.turn_off: backlight
+      - delay: 400ms
+      - lvgl.tileview.select:
+          id: tiles
+          column: 1
+          row: 0
+          animated: false
+      - lvgl.pause:
+
+  - id: update_volume_overlay
+    then:
+      - lvgl.label.update:
+          id: lbl_vol
+          text: !lambda return str_sprintf("%d%%", (int) lv_arc_get_value(id(volume_arc)));
+      - lvgl.label.update:
+          id: lbl_vol_icon
+          text: !lambda |-
+            int v = lv_arc_get_value(id(volume_arc));
+            if (v == 0)
+              return std::string("\U0000e04f");
+            if (v < 50)
+              return std::string("\U0000e04d");
+            return std::string("\U0000e050");
+
+  - id: hide_volume
+    mode: restart
+    then:
+      - script.execute: update_volume_overlay
+      - delay: 1200ms
+      - lvgl.widget.hide: vol_overlay
+
+  # Volume-wiel gelijkzetten met de mediaspeler (bijv. als HA het volume
+  # verandert), behalve terwijl je er zelf aan draait.
+  - id: sync_volume
+    then:
+      - if:
+          condition:
+            lambda: return id(ui_ready) && !lv_obj_has_state(id(volume_arc), LV_STATE_PRESSED);
+          then:
+            - lvgl.arc.update:
+                id: volume_arc
+                value: !lambda return id(speaker_media_player).volume * 100.0f;
+
   - id: update_clock
     then:
       - lvgl.label.update:
@@ -1018,56 +1661,143 @@ script:
             return str_sprintf("%s %d %s", days[now.day_of_week - 1], now.day_of_month,
                                months[now.month - 1]);
 
-  # Weer-icoon, temperatuur en omschrijving (Nederlands).
+  # Weersverwachting ophalen via de actie weather.get_forecasts.
+  # Vereist in Home Assistant: apparaat-opties > "Sta het apparaat toe om
+  # Home Assistant-acties uit te voeren".
+  - id: fetch_forecast
+    then:
+      - if:
+          condition:
+            api.connected:
+          then:
+            - homeassistant.action:
+                action: weather.get_forecasts
+                data:
+                  entity_id: ${weather_entity}
+                  type: daily
+                capture_response: true
+                on_success:
+                  - lambda: |-
+                      static const char *const days[] = {"zo", "ma", "di", "wo", "do", "vr", "za"};
+                      static const int month_offset[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+                      JsonArrayConst list = response["${weather_entity}"]["forecast"].as<JsonArrayConst>();
+                      auto now = id(ha_time).now();
+                      int count = 0;
+                      for (JsonObjectConst f : list) {
+                        if (count >= 4)
+                          break;
+                        const char *datetime = f["datetime"] | "";
+                        int y = 0, mo = 0, d = 0;
+                        if (sscanf(datetime, "%d-%d-%d", &y, &mo, &d) != 3 || mo < 1 || mo > 12)
+                          continue;
+                        // Vandaag overslaan; die staat al bovenaan.
+                        if (now.is_valid() && y == now.year && mo == now.month && d == now.day_of_month)
+                          continue;
+                        int yy = mo < 3 ? y - 1 : y;
+                        int dow = (yy + yy / 4 - yy / 100 + yy / 400 + month_offset[mo - 1] + d) % 7;
+                        float high = f["temperature"] | NAN;
+                        float low = f["templow"] | NAN;
+                        id(fc_day)[count] = days[dow];
+                        id(fc_cond)[count] = f["condition"] | "";
+                        if (std::isnan(high))
+                          id(fc_temp)[count] = "--";
+                        else if (std::isnan(low))
+                          id(fc_temp)[count] = str_sprintf("%.0f°", high);
+                        else
+                          id(fc_temp)[count] = str_sprintf("%.0f/%.0f°", high, low);
+                        count++;
+                      }
+                      id(fc_count) = count;
+                  - script.execute: update_weather
+
+  # Weer-icoon, kleuren, temperatuur, details en verwachting bijwerken.
   - id: update_weather
     then:
-      - lambda: |-
-          struct Condition {
-            const char *state;
-            const char *icon;
-            const char *text;
-          };
-          static const Condition conditions[] = {
-              {"sunny", "\U0000f157", "Zonnig"},
-              {"clear-night", "\U0000f159", "Helder"},
-              {"partlycloudy", "\U0000f172", "Half bewolkt"},
-              {"cloudy", "\U0000f15c", "Bewolkt"},
-              {"fog", "\U0000e818", "Mist"},
-              {"rainy", "\U0000f176", "Regen"},
-              {"pouring", "\U0000f61f", "Stortregen"},
-              {"snowy", "\U0000e2cd", "Sneeuw"},
-              {"snowy-rainy", "\U0000f60b", "Natte sneeuw"},
-              {"hail", "\U0000f67f", "Hagel"},
-              {"lightning", "\U0000ebdb", "Onweer"},
-              {"lightning-rainy", "\U0000ebdb", "Onweersbuien"},
-              {"windy", "\U0000efd8", "Winderig"},
-              {"windy-variant", "\U0000efd8", "Winderig"},
-              {"exceptional", "\U0000f083", "Uitzonderlijk"},
-          };
-          const std::string &state = id(weather_condition).state;
-          id(weather_valid) = false;
-          for (const auto &c : conditions) {
-            if (state == c.state) {
-              id(weather_icon) = c.icon;
-              id(weather_text) = c.text;
-              id(weather_valid) = true;
-              break;
-            }
-          }
-      - lvgl.label.update:
-          id: lbl_weather_icon
-          text: !lambda return id(weather_icon);
-      - lvgl.label.update:
-          id: lbl_weather_temp
-          text: !lambda |-
-            float t = id(weather_temperature).state;
-            if (std::isnan(t))
-              return std::string("");
-            return str_sprintf("%.0f°", t);
-      - lvgl.label.update:
-          id: lbl_weather_cond
-          text: !lambda return id(weather_text);
-      - script.execute: update_ui
+      - if:
+          condition:
+            lambda: return id(ui_ready);
+          then:
+            - lambda: |-
+                struct Condition {
+                  const char *state;
+                  const char *icon;
+                  const char *text;
+                  uint32_t color;
+                  uint32_t tint;
+                };
+                static const Condition conditions[] = {
+                    {"sunny", "\U0000f157", "Zonnig", 0xFFC107, 0x3A2A00},
+                    {"clear-night", "\U0000f159", "Helder", 0x9FA8DA, 0x141A33},
+                    {"partlycloudy", "\U0000f172", "Half bewolkt", 0xFFD54F, 0x2A2A1A},
+                    {"cloudy", "\U0000f15c", "Bewolkt", 0xB0BEC5, 0x1E272C},
+                    {"fog", "\U0000e818", "Mist", 0x90A4AE, 0x22292D},
+                    {"rainy", "\U0000f176", "Regen", 0x4FC3F7, 0x0A2533},
+                    {"pouring", "\U0000f61f", "Stortregen", 0x29B6F6, 0x061C2B},
+                    {"snowy", "\U0000e2cd", "Sneeuw", 0xE1F5FE, 0x26323A},
+                    {"snowy-rainy", "\U0000f60b", "Natte sneeuw", 0x81D4FA, 0x1A2A35},
+                    {"hail", "\U0000f67f", "Hagel", 0xB3E5FC, 0x1A2A35},
+                    {"lightning", "\U0000ebdb", "Onweer", 0xFFEB3B, 0x251E3A},
+                    {"lightning-rainy", "\U0000ebdb", "Onweersbuien", 0xFFEB3B, 0x1E1A33},
+                    {"windy", "\U0000efd8", "Winderig", 0x80CBC4, 0x0F2A28},
+                    {"windy-variant", "\U0000efd8", "Winderig", 0x80CBC4, 0x0F2A28},
+                    {"exceptional", "\U0000f083", "Uitzonderlijk", 0xFF7043, 0x331A10},
+                };
+                auto find = [](const std::string &state) -> const Condition * {
+                  for (const auto &c : conditions) {
+                    if (state == c.state)
+                      return &c;
+                  }
+                  return nullptr;
+                };
+
+                // Huidig weer: Home en pagina Weer
+                const Condition *now = find(id(weather_condition).state);
+                id(weather_valid) = now != nullptr;
+                id(weather_tint) = now ? now->tint : 0x101820;
+                float temp = id(weather_temperature).state;
+                std::string temp_text = std::isnan(temp) ? std::string("--") : str_sprintf("%.0f°", temp);
+                const char *icon = now ? now->icon : "\U0000f15c";
+                lv_color_t color = lv_color_hex(now ? now->color : 0xB0BEC5);
+                lv_label_set_text(id(lbl_weather_icon), icon);
+                lv_obj_set_style_text_color(id(lbl_weather_icon), color, LV_PART_MAIN);
+                lv_label_set_text(id(lbl_weather_temp), temp_text.c_str());
+                lv_label_set_text(id(lbl_weather_cond), now ? now->text : "");
+                lv_label_set_text(id(wx_icon), icon);
+                lv_obj_set_style_text_color(id(wx_icon), color, LV_PART_MAIN);
+                lv_label_set_text(id(wx_temp), temp_text.c_str());
+                lv_label_set_text(id(wx_cond), now ? now->text : "Geen weergegevens");
+
+                float humidity = id(weather_humidity).state;
+                lv_label_set_text(id(wx_humidity),
+                                  std::isnan(humidity) ? "--" : str_sprintf("%.0f%%", humidity).c_str());
+                float wind = id(weather_wind).state;
+                std::string unit = id(weather_wind_unit).state;
+                if (unit == "km/h")
+                  unit = "km/u";
+                lv_label_set_text(id(wx_wind),
+                                  std::isnan(wind) ? "--" : str_sprintf("%.0f %s", wind, unit.c_str()).c_str());
+
+                // Verwachting
+                lv_obj_t *cols[] = {id(fc_col_0), id(fc_col_1), id(fc_col_2), id(fc_col_3)};
+                lv_obj_t *days[] = {id(fc_day_0), id(fc_day_1), id(fc_day_2), id(fc_day_3)};
+                lv_obj_t *icons[] = {id(fc_icon_0), id(fc_icon_1), id(fc_icon_2), id(fc_icon_3)};
+                lv_obj_t *temps[] = {id(fc_temp_0), id(fc_temp_1), id(fc_temp_2), id(fc_temp_3)};
+                for (int i = 0; i < 4; i++) {
+                  if (i >= id(fc_count)) {
+                    lv_obj_add_flag(cols[i], LV_OBJ_FLAG_HIDDEN);
+                    continue;
+                  }
+                  const Condition *c = find(id(fc_cond)[i]);
+                  lv_label_set_text(days[i], id(fc_day)[i].c_str());
+                  lv_label_set_text(icons[i], c ? c->icon : "\U0000f15c");
+                  lv_obj_set_style_text_color(icons[i], lv_color_hex(c ? c->color : 0xB0BEC5), LV_PART_MAIN);
+                  lv_label_set_text(temps[i], id(fc_temp)[i].c_str());
+                  lv_obj_remove_flag(cols[i], LV_OBJ_FLAG_HIDDEN);
+                }
+            - lvgl.widget.update:
+                id: tile_weather
+                bg_color: !lambda return lv_color_hex(id(weather_tint));
+            - script.execute: update_ui
 
   # Eerstvolgende timer (actief gaat voor gepauzeerd) bijwerken.
   - id: update_timer
@@ -1147,6 +1877,26 @@ script:
                 border_color: ${color_idle}
             - delay: 500ms
 
+  # "Ademende" blauwe ring zolang de assistent luistert.
+  - id: listen_pulse
+    mode: restart
+    then:
+      - while:
+          condition:
+            lambda: return id(va_phase) == ${phase_listening};
+          then:
+            - lvgl.widget.update:
+                id: ring
+                border_width: 14
+            - delay: 350ms
+            - lvgl.widget.update:
+                id: ring
+                border_width: 8
+            - delay: 350ms
+      - lvgl.widget.update:
+          id: ring
+          border_width: 8
+
   # Zet het scherm in de juiste weergave voor de huidige fase.
   - id: update_ui
     then:
@@ -1185,6 +1935,31 @@ script:
                       else:
                         - lvgl.widget.hide: lbl_icons
 
+      # --- Knop "Microfoon" op de pagina Bediening ---
+      - if:
+          condition:
+            switch.is_on: mute
+          then:
+            - lvgl.widget.update:
+                id: btn_ctl_mic
+                bg_color: ${color_muted}
+            - lvgl.label.update:
+                id: lbl_ctl_mic_icon
+                text: "\U0000e02b"
+            - lvgl.label.update:
+                id: lbl_ctl_mic
+                text: "Microfoon uit"
+          else:
+            - lvgl.widget.update:
+                id: btn_ctl_mic
+                bg_color: ${color_card}
+            - lvgl.label.update:
+                id: lbl_ctl_mic_icon
+                text: "\U0000e31d"
+            - lvgl.label.update:
+                id: lbl_ctl_mic
+                text: "Microfoon aan"
+
       # --- Rust / microfoon uit / geen verbinding ---
       - if:
           condition:
@@ -1194,7 +1969,6 @@ script:
                      id(va_phase) == ${phase_not_ready};
           then:
             - lvgl.widget.hide: [conv_view, spinner]
-            - lvgl.widget.show: idle_view
             - lambda: id(timer_view_shown) = id(timer_active) && id(va_phase) != ${phase_not_ready};
             # Klok of timer
             - if:
@@ -1239,6 +2013,8 @@ script:
                   - lvgl.widget.update:
                       id: btn_talk
                       bg_color: ${color_muted}
+                      bg_grad_color: ${color_muted}
+                      shadow_color: ${color_muted}
                   - lvgl.label.update:
                       id: lbl_talk_icon
                       text: "\U0000e02b"
@@ -1246,11 +2022,21 @@ script:
                   - lvgl.widget.update:
                       id: ring
                       border_color: ${color_idle}
-                  - lvgl.widget.update:
-                      id: btn_talk
-                      bg_color: !lambda |-
-                        return id(va_phase) == ${phase_idle} ? lv_color_hex(${color_listening})
-                                                             : lv_color_hex(${color_idle});
+                  - if:
+                      condition:
+                        lambda: return id(va_phase) == ${phase_idle};
+                      then:
+                        - lvgl.widget.update:
+                            id: btn_talk
+                            bg_color: ${color_listening}
+                            bg_grad_color: ${color_listening_dark}
+                            shadow_color: ${color_listening}
+                      else:
+                        - lvgl.widget.update:
+                            id: btn_talk
+                            bg_color: ${color_idle}
+                            bg_grad_color: ${color_idle}
+                            shadow_color: ${color_idle}
                   - lvgl.label.update:
                       id: lbl_talk_icon
                       text: "\U0000e31d"
@@ -1265,9 +2051,15 @@ script:
                      id(va_phase) == ${phase_error} ||
                      id(va_phase) == ${phase_timer_finished};
           then:
-            - lvgl.widget.hide: [idle_view, timer_arc]
+            - lvgl.widget.hide: timer_arc
             - lvgl.widget.show: conv_view
             - lambda: id(timer_view_shown) = false;
+            # Na het gesprek terug op Home
+            - lvgl.tileview.select:
+                id: tiles
+                column: 1
+                row: 0
+                animated: false
       - if:
           condition:
             lambda: return id(va_phase) == ${phase_listening};
@@ -1280,6 +2072,7 @@ script:
                 id: lbl_status
                 text: "Luisteren..."
                 text_color: ${color_listening}
+            - script.execute: listen_pulse
       - if:
           condition:
             lambda: return id(va_phase) == ${phase_thinking};
