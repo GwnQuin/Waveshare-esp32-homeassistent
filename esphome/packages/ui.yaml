@@ -1,15 +1,16 @@
 # Rond 360x360 LVGL-scherm voor de spraakassistent.
 #
-#   Rust          : klok + datum, microfoonknop onderaan
-#   Luisteren     : blauwe ring, je vraag in beeld
-#   Denken        : oranje draaiende ring
-#   Antwoorden    : groene ring, het antwoord in beeld
-#   Fout          : rode ring + foutmelding
-#   Timer klaar   : oranje ring, tik om te stoppen
+# Het scherm heeft vier weergaven die elkaar nooit overlappen:
+#   Rust     : statusiconen, weer, klok + datum, microfoonknop
+#   Timer    : naam, grote aftelklok, "klaar om", oranje voortgangsring
+#   Gesprek  : status ("Luisteren...", ...) + vraag/antwoord (scrolt vanzelf)
+#   Alarm    : knipperende ring, "Timer klaar!", zeg "stop" of tik
 #
 # Verwacht de ids lcd en touch uit het bordbestand.
 
 substitutions:
+  # Weer-entiteit uit Home Assistant (standaard van de Met.no-integratie).
+  weather_entity: weather.forecast_home
   color_idle: "0x263238"
   color_listening: "0x2196F3"
   color_thinking: "0xFF9800"
@@ -24,9 +25,51 @@ globals:
     type: bool
     restore_value: false
     initial_value: "false"
+  - id: timer_view_shown
+    type: bool
+    restore_value: false
+    initial_value: "false"
   - id: timer_text
     type: std::string
     restore_value: false
+  - id: timer_name
+    type: std::string
+    restore_value: false
+  - id: timer_end_text
+    type: std::string
+    restore_value: false
+  - id: timer_progress
+    type: int
+    restore_value: false
+    initial_value: "0"
+  - id: weather_valid
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: weather_icon
+    type: std::string
+    restore_value: false
+  - id: weather_text
+    type: std::string
+    restore_value: false
+
+# --- Weer uit Home Assistant ---
+text_sensor:
+  - platform: homeassistant
+    id: weather_condition
+    entity_id: ${weather_entity}
+    internal: true
+    on_value:
+      - script.execute: update_weather
+
+sensor:
+  - platform: homeassistant
+    id: weather_temperature
+    entity_id: ${weather_entity}
+    attribute: temperature
+    internal: true
+    on_value:
+      - script.execute: update_weather
 
 font:
   - file:
@@ -54,20 +97,35 @@ font:
   # Material Symbols, codepoints uit MaterialSymbolsOutlined.codepoints
   - file: gfonts://Material+Symbols+Outlined
     id: font_icons
-    size: 30
+    size: 28
     glyphs:
       - "\U0000e31d" # mic
       - "\U0000e02b" # mic_off
       - "\U0000e648" # wifi_off
       - "\U0000e16f" # link_off
-      - "\U0000e425" # timer
+  - file: gfonts://Material+Symbols+Outlined
+    id: font_icons_weather
+    size: 36
+    glyphs:
+      - "\U0000f157" # clear_day
+      - "\U0000f159" # clear_night
+      - "\U0000f172" # partly_cloudy_day
+      - "\U0000f15c" # cloud
+      - "\U0000e818" # foggy
+      - "\U0000f176" # rainy
+      - "\U0000f61f" # rainy_heavy
+      - "\U0000e2cd" # weather_snowy
+      - "\U0000f60b" # weather_mix
+      - "\U0000f67f" # weather_hail
+      - "\U0000ebdb" # thunderstorm
+      - "\U0000efd8" # air
+      - "\U0000f083" # warning
   - file: gfonts://Material+Symbols+Outlined
     id: font_icons_big
-    size: 44
+    size: 40
     glyphs:
       - "\U0000e31d" # mic
       - "\U0000e02b" # mic_off
-      - "\U0000e047" # stop
 
 lvgl:
   id: lvgl_ui
@@ -96,6 +154,26 @@ lvgl:
             pad_all: 0
             scrollable: false
             clickable: false
+        # Voortgang van de timer, over de ring heen
+        - arc:
+            id: timer_arc
+            align: CENTER
+            width: 356
+            height: 356
+            rotation: 270
+            start_angle: 0
+            end_angle: 360
+            min_value: 0
+            max_value: 1000
+            value: 1000
+            adjustable: false
+            pad_all: 0
+            arc_width: 8
+            arc_color: ${color_idle}
+            indicator:
+              arc_width: 8
+              arc_color: ${color_thinking}
+            hidden: true
         # Draaiende ring tijdens "denken"
         - spinner:
             id: spinner
@@ -112,85 +190,183 @@ lvgl:
             hidden: true
             clickable: false
 
-        # Statusicoon bovenaan (geen WiFi / geen HA / microfoon uit)
-        - label:
-            id: lbl_icons
+        # Statusregel bovenaan: icoon (geen WiFi / geen HA / microfoon uit)
+        # en batterij. Lege onderdelen nemen geen ruimte in.
+        - obj:
+            id: status_row
             align: TOP_MID
-            y: 34
-            text_font: font_icons
-            text: ""
-        - label:
-            id: lbl_battery
-            align: TOP_MID
-            y: 70
-            text_font: font_small
-            text_color: ${color_text_dim}
-            text: ""
-            hidden: true
-
-        # Statusregel ("Luisteren...", "Timer klaar!", ...)
-        - label:
-            id: lbl_status
-            align: TOP_MID
-            y: 96
-            text_font: font_title
-            text: ""
-            hidden: true
-
-        # Klok en datum (rust)
-        - label:
-            id: lbl_time
-            align: CENTER
-            y: -28
-            text_font: font_clock
-            text: "--:--"
-        - label:
-            id: lbl_date
-            align: CENTER
-            y: 38
-            text_font: font_text
-            text_color: ${color_text_dim}
-            text: ""
-        - label:
-            id: lbl_timer
-            align: CENTER
-            y: 76
-            text_font: font_title
-            text_color: ${color_thinking}
-            text: ""
-            hidden: true
-
-        # Vraag / antwoord / foutmelding
-        - label:
-            id: lbl_text
-            align: CENTER
-            y: 20
-            width: 270
-            height: 170
-            text_font: font_text
-            text_align: CENTER
-            long_mode: DOT
-            text: ""
-            hidden: true
-
-        # Microfoonknop: tikken om te praten
-        - button:
-            id: btn_talk
-            align: BOTTOM_MID
-            y: -26
-            width: 76
-            height: 76
-            radius: 38
-            bg_color: ${color_listening}
-            shadow_width: 0
-            on_click:
-              - script.execute: talk_pressed
+            y: 18
+            width: SIZE_CONTENT
+            height: SIZE_CONTENT
+            bg_opa: TRANSP
+            border_width: 0
+            pad_all: 0
+            scrollable: false
+            clickable: false
+            layout:
+              type: flex
+              pad_column: 8
+              flex_flow: ROW
+              flex_align_cross: CENTER
             widgets:
               - label:
-                  id: lbl_talk_icon
+                  id: lbl_icons
+                  text_font: font_icons
+                  text: ""
+                  hidden: true
+              - label:
+                  id: lbl_battery
+                  text_font: font_small
+                  text_color: ${color_text_dim}
+                  text: ""
+                  hidden: true
+
+        # ---------------- Rust en timer ----------------
+        - obj:
+            id: idle_view
+            align: CENTER
+            width: 360
+            height: 360
+            bg_opa: TRANSP
+            border_width: 0
+            pad_all: 0
+            scrollable: false
+            clickable: false
+            widgets:
+              - obj:
+                  id: weather_row
+                  align: TOP_MID
+                  y: 56
+                  width: SIZE_CONTENT
+                  height: SIZE_CONTENT
+                  bg_opa: TRANSP
+                  border_width: 0
+                  pad_all: 0
+                  scrollable: false
+                  clickable: false
+                  hidden: true
+                  layout:
+                    type: flex
+                    pad_column: 6
+                    flex_flow: ROW
+                    flex_align_cross: CENTER
+                  widgets:
+                    - label:
+                        id: lbl_weather_icon
+                        text_font: font_icons_weather
+                        text_color: ${color_thinking}
+                        text: ""
+                    - label:
+                        id: lbl_weather_temp
+                        text_font: font_title
+                        text: ""
+                    - label:
+                        id: lbl_weather_cond
+                        text_font: font_small
+                        text_color: ${color_text_dim}
+                        text: ""
+              - label:
+                  id: lbl_notice
+                  align: TOP_MID
+                  y: 64
+                  text_font: font_title
+                  text_color: ${color_text_dim}
+                  text: ""
+                  hidden: true
+
+              # Klok
+              - label:
+                  id: lbl_time
                   align: CENTER
-                  text_font: font_icons_big
-                  text: "\U0000e31d"
+                  y: -6
+                  text_font: font_clock
+                  text: "--:--"
+              - label:
+                  id: lbl_date
+                  align: CENTER
+                  y: 62
+                  text_font: font_text
+                  text_color: ${color_text_dim}
+                  text: ""
+
+              # Timer (vervangt weer, klok en datum zolang er een timer loopt)
+              - label:
+                  id: lbl_timer_name
+                  align: TOP_MID
+                  y: 64
+                  width: 240
+                  text_align: CENTER
+                  long_mode: DOT
+                  text_font: font_title
+                  text_color: ${color_thinking}
+                  text: ""
+                  hidden: true
+              - label:
+                  id: lbl_timer_count
+                  align: CENTER
+                  y: -6
+                  text_font: font_clock
+                  text_color: ${color_thinking}
+                  text: ""
+                  hidden: true
+              - label:
+                  id: lbl_timer_end
+                  align: CENTER
+                  y: 62
+                  text_font: font_text
+                  text_color: ${color_text_dim}
+                  text: ""
+                  hidden: true
+
+              # Microfoonknop: tikken om te praten
+              - button:
+                  id: btn_talk
+                  align: BOTTOM_MID
+                  y: -22
+                  width: 68
+                  height: 68
+                  radius: 34
+                  bg_color: ${color_listening}
+                  shadow_width: 0
+                  on_click:
+                    - script.execute: talk_pressed
+                  widgets:
+                    - label:
+                        id: lbl_talk_icon
+                        align: CENTER
+                        text_font: font_icons_big
+                        text: "\U0000e31d"
+
+        # ---------------- Gesprek en alarm ----------------
+        - obj:
+            id: conv_view
+            align: CENTER
+            width: 360
+            height: 360
+            bg_opa: TRANSP
+            border_width: 0
+            pad_all: 0
+            scrollable: false
+            clickable: false
+            hidden: true
+            widgets:
+              - label:
+                  id: lbl_status
+                  align: TOP_MID
+                  y: 66
+                  text_font: font_title
+                  text: ""
+              # Lange antwoorden scrollen vanzelf heen en weer.
+              - label:
+                  id: lbl_text
+                  align: TOP_MID
+                  y: 108
+                  width: 270
+                  height: 180
+                  text_font: font_text
+                  text_align: CENTER
+                  long_mode: SCROLL
+                  text: ""
 
 script:
   # Tik op het scherm: altijd eerst het scherm aanzetten; een afgaande
@@ -227,40 +403,136 @@ script:
             return str_sprintf("%s %d %s", days[now.day_of_week - 1], now.day_of_month,
                                months[now.month - 1]);
 
-  # Resterende tijd van de eerstvolgende actieve timer onder de klok.
+  # Weer-icoon, temperatuur en omschrijving (Nederlands).
+  - id: update_weather
+    then:
+      - lambda: |-
+          struct Condition {
+            const char *state;
+            const char *icon;
+            const char *text;
+          };
+          static const Condition conditions[] = {
+              {"sunny", "\U0000f157", "Zonnig"},
+              {"clear-night", "\U0000f159", "Helder"},
+              {"partlycloudy", "\U0000f172", "Half bewolkt"},
+              {"cloudy", "\U0000f15c", "Bewolkt"},
+              {"fog", "\U0000e818", "Mist"},
+              {"rainy", "\U0000f176", "Regen"},
+              {"pouring", "\U0000f61f", "Stortregen"},
+              {"snowy", "\U0000e2cd", "Sneeuw"},
+              {"snowy-rainy", "\U0000f60b", "Natte sneeuw"},
+              {"hail", "\U0000f67f", "Hagel"},
+              {"lightning", "\U0000ebdb", "Onweer"},
+              {"lightning-rainy", "\U0000ebdb", "Onweersbuien"},
+              {"windy", "\U0000efd8", "Winderig"},
+              {"windy-variant", "\U0000efd8", "Winderig"},
+              {"exceptional", "\U0000f083", "Uitzonderlijk"},
+          };
+          const std::string &state = id(weather_condition).state;
+          id(weather_valid) = false;
+          for (const auto &c : conditions) {
+            if (state == c.state) {
+              id(weather_icon) = c.icon;
+              id(weather_text) = c.text;
+              id(weather_valid) = true;
+              break;
+            }
+          }
+      - lvgl.label.update:
+          id: lbl_weather_icon
+          text: !lambda return id(weather_icon);
+      - lvgl.label.update:
+          id: lbl_weather_temp
+          text: !lambda |-
+            float t = id(weather_temperature).state;
+            if (std::isnan(t))
+              return std::string("");
+            return str_sprintf("%.0f°", t);
+      - lvgl.label.update:
+          id: lbl_weather_cond
+          text: !lambda return id(weather_text);
+      - script.execute: update_ui
+
+  # Eerstvolgende timer (actief gaat voor gepauzeerd) bijwerken.
   - id: update_timer
     then:
       - lambda: |-
-          bool found = false;
-          unsigned left = 0;
-          for (const auto &timer : id(va).get_timers()) {
-            if (timer.is_active && (!found || timer.seconds_left < left)) {
-              left = timer.seconds_left;
-              found = true;
+          const auto &timers = id(va).get_timers();
+          int best = -1;
+          for (size_t i = 0; i < timers.size(); i++) {
+            if (best < 0) {
+              best = i;
+              continue;
             }
+            const auto &t = timers[i];
+            const auto &b = timers[best];
+            if ((t.is_active && !b.is_active) ||
+                (t.is_active == b.is_active && t.seconds_left < b.seconds_left))
+              best = i;
           }
-          id(timer_active) = found;
+          id(timer_active) = best >= 0;
+          if (best < 0)
+            return;
+          const auto &timer = timers[best];
+          unsigned left = timer.seconds_left;
           unsigned h = left / 3600, m = (left % 3600) / 60, s = left % 60;
-          if (!found)
-            id(timer_text) = "";
-          else if (h > 0)
-            id(timer_text) = str_sprintf("Timer %u:%02u:%02u", h, m, s);
-          else
-            id(timer_text) = str_sprintf("Timer %02u:%02u", m, s);
-      - lvgl.label.update:
-          id: lbl_timer
-          text: !lambda return id(timer_text);
+          id(timer_text) = h > 0 ? str_sprintf("%u:%02u:%02u", h, m, s) : str_sprintf("%02u:%02u", m, s);
+          std::string name = timer.name.empty() ? std::string("Timer") : timer.name;
+          if (timers.size() > 1)
+            name += str_sprintf(" (+%u)", (unsigned) (timers.size() - 1));
+          id(timer_name) = name;
+          id(timer_progress) = timer.total_seconds > 0 ? (int) (1000ULL * left / timer.total_seconds) : 0;
+          if (!timer.is_active) {
+            id(timer_end_text) = "Gepauzeerd";
+          } else {
+            auto now = id(ha_time).now();
+            if (now.is_valid())
+              id(timer_end_text) = "Klaar om " + ESPTime::from_epoch_local(now.timestamp + left).strftime("%H:%M");
+            else
+              id(timer_end_text) = "";
+          }
       - if:
           condition:
-            lambda: |-
-              bool idle = id(va_phase) == ${phase_idle} || id(va_phase) == ${phase_muted};
-              return idle && id(timer_active);
+            lambda: return id(timer_active);
           then:
-            - lvgl.widget.show: lbl_timer
-          else:
-            - lvgl.widget.hide: lbl_timer
+            - lvgl.label.update:
+                id: lbl_timer_count
+                text: !lambda return id(timer_text);
+            - lvgl.label.update:
+                id: lbl_timer_name
+                text: !lambda return id(timer_name);
+            - lvgl.label.update:
+                id: lbl_timer_end
+                text: !lambda return id(timer_end_text);
+            - lvgl.arc.update:
+                id: timer_arc
+                value: !lambda return id(timer_progress);
+      # Alleen de weergave wisselen als er een timer bijkomt of verdwijnt.
+      - if:
+          condition:
+            lambda: return id(timer_active) != id(timer_view_shown);
+          then:
+            - script.execute: update_ui
 
-  # Zet het scherm in de juiste toestand voor de huidige fase.
+  # Knipperende ring zolang het timer-alarm afgaat.
+  - id: alarm_blink
+    mode: restart
+    then:
+      - while:
+          condition:
+            switch.is_on: timer_ringing
+          then:
+            - lvgl.widget.update:
+                id: ring
+                border_color: ${color_thinking}
+            - delay: 500ms
+            - lvgl.widget.update:
+                id: ring
+                border_color: ${color_idle}
+            - delay: 500ms
+
+  # Zet het scherm in de juiste weergave voor de huidige fase.
   - id: update_ui
     then:
       # --- Statusicoon ---
@@ -273,6 +545,7 @@ script:
                 id: lbl_icons
                 text: "\U0000e648"
                 text_color: ${color_error}
+            - lvgl.widget.show: lbl_icons
           else:
             - if:
                 condition:
@@ -283,6 +556,7 @@ script:
                       id: lbl_icons
                       text: "\U0000e16f"
                       text_color: ${color_thinking}
+                  - lvgl.widget.show: lbl_icons
                 else:
                   - if:
                       condition:
@@ -292,12 +566,11 @@ script:
                             id: lbl_icons
                             text: "\U0000e02b"
                             text_color: ${color_error}
+                        - lvgl.widget.show: lbl_icons
                       else:
-                        - lvgl.label.update:
-                            id: lbl_icons
-                            text: ""
+                        - lvgl.widget.hide: lbl_icons
 
-      # --- Rust / microfoon uit / geen verbinding: klok tonen ---
+      # --- Rust / microfoon uit / geen verbinding ---
       - if:
           condition:
             lambda: |-
@@ -305,64 +578,69 @@ script:
                      id(va_phase) == ${phase_muted} ||
                      id(va_phase) == ${phase_not_ready};
           then:
-            - lvgl.widget.hide: [spinner, lbl_text]
-            - lvgl.widget.show: [lbl_time, lbl_date, btn_talk]
-            - script.execute: update_timer
-      - if:
-          condition:
-            lambda: return id(va_phase) == ${phase_idle};
-          then:
-            - lvgl.widget.update:
-                id: ring
-                border_color: ${color_idle}
-            - lvgl.widget.hide: lbl_status
-            - lvgl.widget.update:
-                id: btn_talk
-                bg_color: ${color_listening}
-            - lvgl.label.update:
-                id: lbl_talk_icon
-                text: "\U0000e31d"
-      - if:
-          condition:
-            lambda: return id(va_phase) == ${phase_muted};
-          then:
-            - lvgl.widget.update:
-                id: ring
-                border_color: ${color_muted}
-            - lvgl.label.update:
-                id: lbl_status
-                text: "Microfoon uit"
-                text_color: ${color_error}
-            - lvgl.widget.show: lbl_status
-            - lvgl.widget.update:
-                id: btn_talk
-                bg_color: ${color_muted}
-            - lvgl.label.update:
-                id: lbl_talk_icon
-                text: "\U0000e02b"
-      - if:
-          condition:
-            lambda: return id(va_phase) == ${phase_not_ready};
-          then:
-            - lvgl.widget.update:
-                id: ring
-                border_color: ${color_idle}
-            - lvgl.label.update:
-                id: lbl_status
-                text: !lambda |-
-                  if (id(init_in_progress))
-                    return std::string("Opstarten...");
-                  return std::string("Geen verbinding");
-                text_color: ${color_text_dim}
-            - lvgl.widget.show: lbl_status
-            - lvgl.widget.update:
-                id: btn_talk
-                bg_color: ${color_idle}
-            - lvgl.label.update:
-                id: lbl_talk_icon
-                text: "\U0000e31d"
+            - lvgl.widget.hide: [conv_view, spinner]
+            - lvgl.widget.show: idle_view
+            - lambda: id(timer_view_shown) = id(timer_active) && id(va_phase) != ${phase_not_ready};
+            # Klok of timer
+            - if:
+                condition:
+                  lambda: return id(timer_view_shown);
+                then:
+                  - lvgl.widget.hide: [lbl_time, lbl_date, weather_row, lbl_notice]
+                  - lvgl.widget.show: [lbl_timer_name, lbl_timer_count, lbl_timer_end, timer_arc]
+                else:
+                  - lvgl.widget.hide: [lbl_timer_name, lbl_timer_count, lbl_timer_end, timer_arc]
+                  - lvgl.widget.show: [lbl_time, lbl_date]
+                  # Weer, of een melding als er (nog) geen verbinding is
+                  - if:
+                      condition:
+                        lambda: return id(va_phase) == ${phase_not_ready};
+                      then:
+                        - lvgl.widget.hide: weather_row
+                        - lvgl.label.update:
+                            id: lbl_notice
+                            text: !lambda |-
+                              if (id(init_in_progress))
+                                return std::string("Opstarten...");
+                              return std::string("Geen verbinding");
+                        - lvgl.widget.show: lbl_notice
+                      else:
+                        - lvgl.widget.hide: lbl_notice
+                        - if:
+                            condition:
+                              lambda: return id(weather_valid);
+                            then:
+                              - lvgl.widget.show: weather_row
+                            else:
+                              - lvgl.widget.hide: weather_row
+            # Ring en microfoonknop
+            - if:
+                condition:
+                  lambda: return id(va_phase) == ${phase_muted};
+                then:
+                  - lvgl.widget.update:
+                      id: ring
+                      border_color: ${color_muted}
+                  - lvgl.widget.update:
+                      id: btn_talk
+                      bg_color: ${color_muted}
+                  - lvgl.label.update:
+                      id: lbl_talk_icon
+                      text: "\U0000e02b"
+                else:
+                  - lvgl.widget.update:
+                      id: ring
+                      border_color: ${color_idle}
+                  - lvgl.widget.update:
+                      id: btn_talk
+                      bg_color: !lambda |-
+                        return id(va_phase) == ${phase_idle} ? lv_color_hex(${color_listening})
+                                                             : lv_color_hex(${color_idle});
+                  - lvgl.label.update:
+                      id: lbl_talk_icon
+                      text: "\U0000e31d"
 
-      # --- Gesprek: vraag/antwoord in beeld ---
+      # --- Gesprek en alarm ---
       - if:
           condition:
             lambda: |-
@@ -372,8 +650,9 @@ script:
                      id(va_phase) == ${phase_error} ||
                      id(va_phase) == ${phase_timer_finished};
           then:
-            - lvgl.widget.hide: [lbl_time, lbl_date, lbl_timer, btn_talk]
-            - lvgl.widget.show: [lbl_status, lbl_text]
+            - lvgl.widget.hide: [idle_view, timer_arc]
+            - lvgl.widget.show: conv_view
+            - lambda: id(timer_view_shown) = false;
       - if:
           condition:
             lambda: return id(va_phase) == ${phase_listening};
@@ -427,13 +706,13 @@ script:
             lambda: return id(va_phase) == ${phase_timer_finished};
           then:
             - lvgl.widget.hide: spinner
-            - lvgl.widget.update:
-                id: ring
-                border_color: ${color_thinking}
             - lvgl.label.update:
                 id: lbl_status
                 text: "Timer klaar!"
                 text_color: ${color_thinking}
             - lvgl.label.update:
                 id: lbl_text
-                text: "Tik op het scherm om het alarm te stoppen"
+                text: !lambda |-
+                  std::string name = id(finished_timer_name).empty() ? std::string("Timer")
+                                                                     : id(finished_timer_name);
+                  return name + "\n\nZeg \"stop\" of tik op het scherm";

@@ -20,6 +20,10 @@ globals:
     type: int
     restore_value: false
     initial_value: ${phase_not_ready}
+  # Naam van de timer die afgaat ("pasta", ...), voor op het scherm
+  - id: finished_timer_name
+    type: std::string
+    restore_value: false
 
 micro_wake_word:
   id: mww
@@ -33,10 +37,21 @@ micro_wake_word:
       id: hey_jarvis
     - model: hey_mycroft
       id: hey_mycroft
+    # "Stop": alleen actief terwijl een timer afgaat (zoals de Voice PE).
+    - model: https://github.com/kahrendt/microWakeWord/releases/download/stop/stop.json
+      id: stop
+      internal: true
   on_wake_word_detected:
     - script.execute: screen_wake
-    - voice_assistant.start:
-        wake_word: !lambda return wake_word;
+    # Gaat er een timer af? Dan stopt elk wake word (of "stop") het alarm.
+    - if:
+        condition:
+          switch.is_on: timer_ringing
+        then:
+          - switch.turn_off: timer_ringing
+        else:
+          - voice_assistant.start:
+              wake_word: !lambda return wake_word;
 
 media_player:
   - platform: speaker
@@ -75,8 +90,6 @@ media_player:
               voice_assistant.is_running:
           then:
             - script.execute: start_wake_word
-            - script.execute: set_idle_or_mute_phase
-            - script.execute: update_ui
 
 voice_assistant:
   id: va
@@ -120,7 +133,15 @@ voice_assistant:
                 media_player.is_announcing: speaker_media_player
             - not:
                 speaker.is_playing: speaker_out
-    - script.execute: start_wake_word
+    # Wake word direct weer aanzetten. Niet via start_wake_word: op dit
+    # moment telt de assistent nog als "bezig", waardoor het wake word na
+    # het eerste gesprek uit bleef.
+    - if:
+        condition:
+          not:
+            micro_wake_word.is_running:
+        then:
+          - micro_wake_word.start:
     - if:
         condition:
           lambda: return id(va_phase) != ${phase_error} && id(va_phase) != ${phase_timer_finished};
@@ -164,14 +185,8 @@ voice_assistant:
   on_timer_tick:
     - script.execute: update_timer
   on_timer_finished:
+    - lambda: id(finished_timer_name) = timer.name;
     - switch.turn_on: timer_ringing
-    - wait_until:
-        condition:
-          media_player.is_announcing: speaker_media_player
-        timeout: 5s
-    - lambda: id(va_phase) = ${phase_timer_finished};
-    - script.execute: screen_wake
-    - script.execute: update_ui
 
 switch:
   - platform: template
@@ -202,38 +217,31 @@ switch:
     optimistic: true
     internal: true
     restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - micro_wake_word.enable_model: stop
+      - lambda: id(va_phase) = ${phase_timer_finished};
+      - script.execute: screen_wake
+      - script.execute: update_ui
+      - script.execute: timer_alarm
+      - script.execute: alarm_blink
     on_turn_off:
-      # Herhalen uitzetten en het alarmgeluid stoppen
-      - lambda: |-
-          id(speaker_media_player)
-            ->make_call()
-            .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_OFF)
-            .set_announcement(true)
-            .perform();
-          id(speaker_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 0);
-      - media_player.stop:
-          id: speaker_media_player
-          announcement: true
+      - script.stop: timer_alarm
+      - script.stop: alarm_blink
+      - micro_wake_word.disable_model: stop
+      - if:
+          condition:
+            media_player.is_announcing: speaker_media_player
+          then:
+            - media_player.stop:
+                id: speaker_media_player
+                announcement: true
       - if:
           condition:
             lambda: return id(va_phase) == ${phase_timer_finished};
           then:
             - script.execute: set_idle_or_mute_phase
             - script.execute: update_ui
-    on_turn_on:
-      # Alarm herhalen met 1 s pauze, maximaal 15 minuten
-      - lambda: |-
-          id(speaker_media_player)
-            ->make_call()
-            .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_ONE)
-            .set_announcement(true)
-            .perform();
-          id(speaker_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 1000);
-      - media_player.speaker.play_on_device_media_file:
-          media_file: timer_finished_sound
-          announcement: true
-      - delay: 15min
-      - switch.turn_off: timer_ringing
+      - script.execute: start_wake_word
 
 button:
   # Speaker testen zonder de spraakassistent
@@ -273,6 +281,33 @@ script:
             - lambda: id(va_phase) = ${phase_muted};
           else:
             - lambda: id(va_phase) = ${phase_idle};
+
+  # Timer-alarm: geluid afspelen en in de pauzes luisteren naar "stop" of een
+  # wake word. Op borden met één gedeelde I2S-bus kan de microfoon alleen
+  # luisteren als de speaker stil is, vandaar de pauzes. Na ~15 minuten
+  # stopt het alarm vanzelf.
+  - id: timer_alarm
+    mode: restart
+    then:
+      - repeat:
+          count: 180
+          then:
+            - media_player.speaker.play_on_device_media_file:
+                id: speaker_media_player
+                media_file: timer_finished_sound
+                announcement: true
+            - wait_until:
+                condition:
+                  media_player.is_announcing: speaker_media_player
+                timeout: 2s
+            - wait_until:
+                condition:
+                  not:
+                    media_player.is_announcing: speaker_media_player
+                timeout: 10s
+            - script.execute: start_wake_word
+            - delay: 3s
+      - switch.turn_off: timer_ringing
 
   # BOOT-knop of microfoonknop op het scherm.
   - id: talk_pressed

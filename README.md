@@ -10,11 +10,13 @@ met de Home Assistant Voice Preview Edition, maar dan met een scherm.
   of *"Hey Mycroft"*, te kiezen in Home Assistant.
 - Spraakopdrachten via Assist; het antwoord komt uit de speaker en staat op het
   scherm.
-- Rond scherm met klok en datum (in het Nederlands), een gekleurde ring per
-  status (blauw = luisteren, oranje = denken, groen = antwoord, rood = fout) en
-  een microfoonknop om zonder wake word te praten.
-- Timers ("zet een timer van 5 minuten") met aftellen op het scherm en een
-  alarmgeluid. Tik op het scherm om het alarm te stoppen.
+- Rond scherm met het weer, klok en datum (in het Nederlands), een gekleurde
+  ring per status (blauw = luisteren, oranje = denken, groen = antwoord,
+  rood = fout) en een microfoonknop om zonder wake word te praten. Lange
+  antwoorden scrollen vanzelf.
+- Timers ("zet een timer van 5 minuten"): grote aftelklok met de naam van de
+  timer, de eindtijd en een oranje voortgangsring. Gaat hij af, zeg dan
+  **"stop"** (of het wake word) of tik op het scherm.
 - De speaker verschijnt als mediaspeler in Home Assistant, dus je kunt er ook
   TTS-meldingen naartoe sturen.
 - Het scherm dimt (of gaat uit) als het apparaat niets doet, wat scheelt op
@@ -147,6 +149,7 @@ Daar kies je ook het wake word en de Assist-pipeline.
 | Wake word zeggen | Begint te luisteren (ring wordt blauw) |
 | Tik op de **microfoonknop** op het scherm | Praten zonder wake word (staat de microfoon uit, dan gaat hij weer aan) |
 | Tik ergens op het scherm | Scherm aan / timer-alarm stoppen |
+| **"Stop"** zeggen terwijl een timer afgaat | Alarm stoppen (het wake word werkt ook) |
 | **BOOT**-knop kort | Praten, of stoppen als hij al bezig is / alarm stoppen |
 | **BOOT**-knop 1 seconde vasthouden | Microfoon uit/aan |
 | **Aan/uit**-knop 3 seconden vasthouden (alleen 1.85) | Uitschakelen (alleen op batterij) |
@@ -161,7 +164,44 @@ Daar kies je ook het wake word en de Assist-pipeline.
 - Mediaspeler voor volume en TTS-meldingen
 - Op de gewone 1.85: *Batterij* en *Batterijspanning*
 
-## 5. Problemen oplossen
+## 5. Tips voor Home Assistant
+
+**Korte antwoorden.** Zet in de instellingen van je AI-agent (bijvoorbeeld
+Anthropic) bij *Instructies* iets als:
+
+> Je bent de spraakassistent van ons huis. Antwoord altijd in het Nederlands in
+> maximaal twee korte zinnen. Gebruik geen opsommingen, emoji of opmaak; je
+> antwoord wordt hardop voorgelezen en op een klein rond scherm getoond.
+
+**Het weer.** Het scherm toont het weer van `weather.forecast_home` (de
+standaard Met.no-integratie). Heet jouw weer-entiteit anders, pas dan
+`weather_entity` aan bij `substitutions:`. Wil je dat de assistent het weer
+ook kan *vertellen*:
+
+1. *Instellingen → Spraakassistenten → Entiteiten blootstellen*: zet je
+   weer-entiteit aan.
+2. Voor de verwachting van morgen of later: maak een script aan (*Instellingen →
+   Automatiseringen & scènes → Scripts → Nieuw script → YAML bewerken*) en zet
+   het daarna ook aan bij *Entiteiten blootstellen*:
+
+```yaml
+alias: Weersverwachting ophalen
+description: >-
+  Haalt de weersverwachting voor de komende dagen op. Gebruik dit voor vragen
+  over het weer van morgen of later.
+mode: parallel
+sequence:
+  - action: weather.get_forecasts
+    target:
+      entity_id: weather.forecast_home
+    data:
+      type: daily
+    response_variable: verwachting
+  - stop: Klaar
+    response_variable: verwachting
+```
+
+## 6. Problemen oplossen
 
 - **Scherm blijft zwart, of toont ruis of strepen.** Waveshare heeft twee
   versies van het schermpaneel geleverd. Voeg dan
