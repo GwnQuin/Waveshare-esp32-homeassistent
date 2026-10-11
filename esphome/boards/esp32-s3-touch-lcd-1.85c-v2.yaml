@@ -1,0 +1,119 @@
+# Hardware: Waveshare ESP32-S3-Touch-LCD-1.85C, hardwareversie V2
+# (verkocht vanaf februari 2026; herkenbaar aan de ES8311/ES7210 audiochips)
+#
+#   Scherm   : 1.85" rond 360x360, ST77916 via QSPI
+#   Touch    : CST816 op de gedeelde I2C-bus (GPIO11/GPIO10)
+#   Audio    : ES8311 codec (speaker) + ES7210 ADC (twee microfoons),
+#              NS4150B versterker met enable op GPIO15
+#   Overig   : TCA9554 IO-expander (reset scherm/touch)
+#
+# Pinnen komen uit Waveshare's eigen board-code in de xiaozhi-esp32 firmware
+# (main/boards/waveshare/esp32-s3-touch-lcd-1.85c, CONFIG_VERSION_2_0).
+# De audio-opzet volgt de officiële ESPHome-config van de ESP32-S3-BOX-3,
+# die dezelfde ES8311/ES7210 combinatie gebruikt.
+#
+# Dit bestand levert de ids die de gedeelde pakketten verwachten:
+#   lcd, touch, mic_in, speaker_out
+
+i2c:
+  - id: i2c_main
+    sda: GPIO11
+    scl: GPIO10
+    # Toont bij het opstarten welke chips er zijn (zie README > Welke variant).
+    scan: true
+
+pca9554:
+  - id: io_expander
+    i2c_id: i2c_main
+    address: 0x20
+
+spi:
+  - id: lcd_qspi
+    type: quad
+    clk_pin: GPIO40
+    data_pins:
+      - number: GPIO46
+        ignore_strapping_warning: true
+      - number: GPIO45
+        ignore_strapping_warning: true
+      - GPIO42
+      - GPIO41
+
+display:
+  - platform: mipi_spi
+    id: lcd
+    # Waveshare's "nieuwe" ST77916-init (zelfde als ESPHome's ESP-VOCAT).
+    # Ruis of strepen? Voeg dan boards/scherm-oud-paneel.yaml toe.
+    model: ESP-VOCAT
+    spi_id: lcd_qspi
+    cs_pin: GPIO21
+    # EXIO2 op de TCA9554 (bit 1) = LCD reset
+    reset_pin:
+      pca9554: io_expander
+      number: 1
+    auto_clear_enabled: false
+    update_interval: never
+
+touchscreen:
+  - platform: cst816
+    id: touch
+    i2c_id: i2c_main
+    interrupt_pin: GPIO4
+    # EXIO1 op de TCA9554 (bit 0) = touch reset
+    reset_pin:
+      pca9554: io_expander
+      number: 0
+    on_touch:
+      - script.execute: screen_touched
+
+# --- Audio: één gedeelde I2S-bus voor ES7210 (mic) en ES8311 (speaker) ---
+i2s_audio:
+  - id: i2s_bus
+    i2s_lrclk_pin: GPIO38
+    i2s_bclk_pin: GPIO48
+    i2s_mclk_pin: GPIO2
+
+audio_adc:
+  - platform: es7210
+    id: es7210_adc
+    i2c_id: i2c_main
+    bits_per_sample: 16bit
+    sample_rate: 16000
+
+audio_dac:
+  - platform: es8311
+    id: es8311_dac
+    i2c_id: i2c_main
+    bits_per_sample: 16bit
+    sample_rate: 48000
+
+microphone:
+  - platform: i2s_audio
+    id: mic_in
+    i2s_audio_id: i2s_bus
+    i2s_din_pin: GPIO39
+    adc_type: external
+    sample_rate: 16000
+    bits_per_sample: 16bit
+
+speaker:
+  - platform: i2s_audio
+    id: speaker_out
+    i2s_audio_id: i2s_bus
+    i2s_dout_pin: GPIO47
+    dac_type: external
+    audio_dac: es8311_dac
+    sample_rate: 48000
+    bits_per_sample: 16bit
+    channel: left
+    buffer_duration: 100ms
+
+switch:
+  # Versterker (NS4150B) aan/uit
+  - platform: gpio
+    id: speaker_amp
+    name: Versterker
+    pin: GPIO15
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+    disabled_by_default: true

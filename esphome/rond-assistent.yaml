@@ -1,0 +1,31 @@
+# Waveshare ESP32-S3 1.85" rond scherm als Home Assistant spraakassistent.
+#
+# Dit bestand gebruikt de pakketten uit deze map (lokaal). Wil je niets
+# kopiëren, gebruik dan de GitHub-variant uit de README.
+
+substitutions:
+  name: rond-assistent
+  friendly_name: Rond Assistent
+
+packages:
+  # Kies je bord: laat precies ÉÉN regel aanstaan (zie README om je
+  # variant te herkennen).
+  board: !include boards/esp32-s3-touch-lcd-1.85.yaml
+  # board: !include boards/esp32-s3-touch-lcd-1.85c-v1.yaml
+  # board: !include boards/esp32-s3-touch-lcd-1.85c-v2.yaml
+  # board: !include boards/esp32-s3-touch-lcd-1.85b.yaml
+
+  # Alleen als het scherm ruis/strepen toont (oudere panelen, niet voor 1.85B):
+  # old_panel: !include boards/scherm-oud-paneel.yaml
+
+  base: !include packages/base.yaml
+  voice: !include packages/voice.yaml
+  ui: !include packages/ui.yaml
+
+api:
+  encryption:
+    key: !secret rond_assistent_api_key
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password

@@ -1,0 +1,198 @@
+# Basis: ESP32-S3, WiFi, Home Assistant API, OTA, tijd, achtergrondverlichting
+# en de BOOT-knop. Geldt voor alle 1.85"-varianten.
+
+substitutions:
+  name: rond-assistent
+  friendly_name: Rond Assistent
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2026.9.0
+  project:
+    name: gwnquin.waveshare-rond-assistent
+    version: "1.0.0"
+  on_boot:
+    - priority: -100
+      then:
+        - script.execute: update_clock
+        - script.execute: update_ui
+        - script.execute: screen_wake
+        # Geef WiFi/HA even de tijd; daarna mogen fouten weer op het scherm.
+        - delay: 30s
+        - lambda: id(init_in_progress) = false;
+        - script.execute: update_ui
+
+esp32:
+  board: esp32-s3-devkitc-1
+  flash_size: 16MB
+  cpu_frequency: 240MHz
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+
+api:
+  on_client_connected:
+    - script.execute: update_ui
+  on_client_disconnected:
+    - script.execute: update_ui
+
+ota:
+  - platform: esphome
+    id: ota_esphome
+
+wifi:
+  ap: {}
+  on_connect:
+    - script.execute: update_ui
+  on_disconnect:
+    - script.execute: update_ui
+
+captive_portal:
+
+time:
+  - platform: homeassistant
+    id: ha_time
+    on_time_sync:
+      - script.execute: update_clock
+    on_time:
+      - seconds: 0
+        then:
+          - script.execute: update_clock
+
+globals:
+  - id: init_in_progress
+    type: bool
+    restore_value: false
+    initial_value: "true"
+
+# --- Achtergrondverlichting (GPIO5 op alle varianten) ---
+output:
+  - platform: ledc
+    id: backlight_output
+    pin: GPIO5
+
+light:
+  - platform: monochromatic
+    id: backlight
+    name: Scherm
+    icon: mdi:television
+    output: backlight_output
+    restore_mode: ALWAYS_ON
+    default_transition_length: 250ms
+
+number:
+  - platform: template
+    id: screen_brightness
+    name: Schermhelderheid
+    icon: mdi:brightness-6
+    entity_category: config
+    unit_of_measurement: "%"
+    min_value: 10
+    max_value: 100
+    step: 5
+    initial_value: 80
+    optimistic: true
+    restore_value: true
+    on_value:
+      - script.execute: screen_wake
+  - platform: template
+    id: screen_dim_brightness
+    name: Helderheid in rust
+    icon: mdi:brightness-4
+    entity_category: config
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 5
+    initial_value: 10
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: screen_timeout
+    name: Scherm dimmen na
+    icon: mdi:timer-sand
+    entity_category: config
+    unit_of_measurement: s
+    min_value: 5
+    max_value: 600
+    step: 5
+    initial_value: 30
+    optimistic: true
+    restore_value: true
+
+# --- BOOT-knop (GPIO0, aanwezig op alle varianten) ---
+#   kort drukken : praten / stoppen / timer-alarm uitzetten
+#   1 s vasthouden: microfoon aan/uit
+binary_sensor:
+  - platform: gpio
+    id: boot_button
+    pin:
+      number: GPIO0
+      inverted: true
+      ignore_strapping_warning: true
+      mode:
+        input: true
+        pullup: true
+    internal: true
+    on_multi_click:
+      - timing:
+          - ON for at most 800ms
+          - OFF for at least 50ms
+        then:
+          - script.execute: screen_wake
+          - script.execute: talk_pressed
+      - timing:
+          - ON for at least 1s
+        then:
+          - script.execute: screen_wake
+          - switch.toggle: mute
+
+button:
+  - platform: restart
+    name: Herstarten
+    entity_category: diagnostic
+
+sensor:
+  - platform: wifi_signal
+    name: WiFi-signaal
+    update_interval: 60s
+    entity_category: diagnostic
+
+script:
+  # Scherm aan op volle helderheid en (opnieuw) de dim-timer starten.
+  - id: screen_wake
+    mode: restart
+    then:
+      - lvgl.resume:
+      - light.turn_on:
+          id: backlight
+          brightness: !lambda return id(screen_brightness).state / 100.0f;
+      - delay: !lambda return (uint32_t) (id(screen_timeout).state * 1000.0f);
+      # Niet dimmen terwijl de assistent bezig is of een timer afgaat.
+      - wait_until:
+          condition:
+            lambda: |-
+              return id(va_phase) == ${phase_idle} ||
+                     id(va_phase) == ${phase_muted} ||
+                     id(va_phase) == ${phase_not_ready};
+      - if:
+          condition:
+            lambda: return id(screen_dim_brightness).state > 0.0f;
+          then:
+            - light.turn_on:
+                id: backlight
+                brightness: !lambda return id(screen_dim_brightness).state / 100.0f;
+          else:
+            - light.turn_off: backlight
+            - delay: 500ms
+            - lvgl.pause:

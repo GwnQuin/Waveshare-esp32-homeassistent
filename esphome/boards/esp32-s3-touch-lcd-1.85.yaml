@@ -1,0 +1,179 @@
+# Hardware: Waveshare ESP32-S3-Touch-LCD-1.85 (de "gewone" 1.85, zonder letter)
+#
+#   Scherm   : 1.85" rond 360x360, ST77916 via QSPI
+#   Touch    : CST816 op een eigen I2C-bus (GPIO1/GPIO3)
+#   Audio    : I2S MEMS-microfoon + PCM5101 DAC met speakeraansluiting
+#   Overig   : TCA9554 IO-expander (reset scherm/touch), batterij-lader,
+#              aan/uit-knop met "power latch" (GPIO6/GPIO7)
+#
+# Pinnen komen uit Waveshare's eigen board-code in de xiaozhi-esp32 firmware
+# (main/boards/waveshare/esp32-s3-touch-lcd-1.85).
+#
+# Dit bestand levert de ids die de gedeelde pakketten verwachten:
+#   lcd, touch, mic_in, speaker_out
+
+i2c:
+  - id: i2c_main
+    sda: GPIO11
+    scl: GPIO10
+    # Toont bij het opstarten welke chips er zijn (zie README > Welke variant).
+    scan: true
+  - id: i2c_touch
+    sda: GPIO1
+    scl:
+      number: GPIO3
+      ignore_strapping_warning: true
+    scan: false
+
+pca9554:
+  - id: io_expander
+    i2c_id: i2c_main
+    address: 0x20
+
+spi:
+  - id: lcd_qspi
+    type: quad
+    clk_pin: GPIO40
+    data_pins:
+      - number: GPIO46
+        ignore_strapping_warning: true
+      - number: GPIO45
+        ignore_strapping_warning: true
+      - GPIO42
+      - GPIO41
+
+display:
+  - platform: mipi_spi
+    id: lcd
+    # Waveshare's "nieuwe" ST77916-init (zelfde als ESPHome's ESP-VOCAT).
+    # Ruis of strepen? Voeg dan boards/scherm-oud-paneel.yaml toe.
+    model: ESP-VOCAT
+    spi_id: lcd_qspi
+    cs_pin: GPIO21
+    # EXIO2 op de TCA9554 (bit 1) = LCD reset
+    reset_pin:
+      pca9554: io_expander
+      number: 1
+    auto_clear_enabled: false
+    update_interval: never
+
+touchscreen:
+  - platform: cst816
+    id: touch
+    i2c_id: i2c_touch
+    interrupt_pin: GPIO4
+    # EXIO1 op de TCA9554 (bit 0) = touch reset
+    reset_pin:
+      pca9554: io_expander
+      number: 0
+    on_touch:
+      - script.execute: screen_touched
+
+# --- Audio: aparte I2S-bussen voor microfoon en speaker (full duplex) ---
+i2s_audio:
+  - id: i2s_mic_bus
+    i2s_lrclk_pin: GPIO2
+    i2s_bclk_pin: GPIO15
+  - id: i2s_speaker_bus
+    i2s_lrclk_pin: GPIO38
+    i2s_bclk_pin: GPIO48
+
+microphone:
+  - platform: i2s_audio
+    id: mic_in
+    i2s_audio_id: i2s_mic_bus
+    i2s_din_pin: GPIO39
+    adc_type: external
+    pdm: false
+    channel: right
+    sample_rate: 16000
+    # De MEMS-microfoon wil minimaal ~1 MHz bitklok: 32-bit slots bij 16 kHz.
+    bits_per_sample: 32bit
+
+speaker:
+  - platform: i2s_audio
+    id: speaker_out
+    i2s_audio_id: i2s_speaker_bus
+    i2s_dout_pin: GPIO47
+    dac_type: external
+    sample_rate: 48000
+    bits_per_sample: 16bit
+    buffer_duration: 100ms
+
+# --- Voeding en batterij ---
+switch:
+  # GPIO7 houdt de voeding aan als je op batterij draait (wordt bij het
+  # opstarten direct hoog gezet). Laag = uit.
+  - platform: gpio
+    id: power_hold
+    pin: GPIO7
+    restore_mode: ALWAYS_ON
+    internal: true
+
+binary_sensor:
+  # Aan/uit-knop: 3 seconden vasthouden = uitschakelen (alleen op batterij).
+  - platform: gpio
+    id: power_button
+    pin:
+      number: GPIO6
+      inverted: true
+    internal: true
+    filters:
+      - delayed_on: 3s
+    on_press:
+      # Negeer de knop direct na het opstarten (dan houd je hem nog vast
+      # om het bord aan te zetten).
+      - if:
+          condition:
+            lambda: return millis() > 15000;
+          then:
+            - script.execute: power_off
+
+script:
+  - id: power_off
+    then:
+      - lvgl.label.update:
+          id: lbl_status
+          text: "Uitschakelen..."
+          text_color: 0xFFFFFF
+      - lvgl.widget.show: lbl_status
+      - delay: 1s
+      - light.turn_off: backlight
+      - switch.turn_off: power_hold
+
+sensor:
+  # Batterijspanning via spanningsdeler (1:3) op GPIO8.
+  # Controleer de waarde met een multimeter en pas zo nodig "multiply" aan.
+  - platform: adc
+    id: battery_voltage
+    name: Batterijspanning
+    pin: GPIO8
+    attenuation: 12db
+    update_interval: 30s
+    accuracy_decimals: 2
+    entity_category: diagnostic
+    filters:
+      - multiply: 3.0
+      - sliding_window_moving_average:
+          window_size: 4
+          send_every: 1
+  - platform: copy
+    source_id: battery_voltage
+    id: battery_level
+    name: Batterij
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - calibrate_linear:
+          - 3.30 -> 0.0
+          - 4.15 -> 100.0
+      - clamp:
+          min_value: 0
+          max_value: 100
+    on_value:
+      - lvgl.label.update:
+          id: lbl_battery
+          text: !lambda return str_sprintf("%.0f%%", x);
+      - lvgl.widget.show: lbl_battery

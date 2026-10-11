@@ -1,0 +1,292 @@
+# Spraakassistent: wake word op het apparaat (microWakeWord), Assist via
+# Home Assistant, speaker als media player (TTS, mededelingen) en timers.
+#
+# Gebaseerd op de officiële ESPHome voice-configs (ESP32-S3-BOX-3 /
+# Home Assistant Voice PE). Verwacht de ids mic_in en speaker_out uit het
+# bordbestand.
+
+substitutions:
+  phase_idle: "1"
+  phase_listening: "2"
+  phase_thinking: "3"
+  phase_replying: "4"
+  phase_not_ready: "10"
+  phase_error: "11"
+  phase_muted: "12"
+  phase_timer_finished: "20"
+
+globals:
+  - id: va_phase
+    type: int
+    restore_value: false
+    initial_value: ${phase_not_ready}
+
+micro_wake_word:
+  id: mww
+  microphone: mic_in
+  # Kies in Home Assistant welk wake word actief is (apparaatpagina >
+  # Assist-satelliet > Wake word).
+  models:
+    - model: okay_nabu
+      id: okay_nabu
+    - model: hey_jarvis
+      id: hey_jarvis
+    - model: hey_mycroft
+      id: hey_mycroft
+  on_wake_word_detected:
+    - script.execute: screen_wake
+    - voice_assistant.start:
+        wake_word: !lambda return wake_word;
+
+media_player:
+  - platform: speaker
+    id: speaker_media_player
+    name: None
+    volume_min: 0.4
+    volume_max: 0.85
+    announcement_pipeline:
+      speaker: speaker_out
+      format: FLAC
+      sample_rate: 48000
+      num_channels: 1
+    files:
+      - id: timer_finished_sound
+        file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/timer_finished.flac
+    on_announcement:
+      # Op borden met één gedeelde I2S-bus kan de microfoon niet tegelijk
+      # met de speaker draaien: wake word tijdelijk stoppen.
+      - if:
+          condition:
+            microphone.is_capturing: mic_in
+          then:
+            - micro_wake_word.stop:
+      # Mededeling vanuit Home Assistant (geen gesprek): scherm aan.
+      - if:
+          condition:
+            not:
+              voice_assistant.is_running:
+          then:
+            - script.execute: screen_wake
+    on_idle:
+      # Einde van een mededeling buiten een gesprek: wake word weer aan.
+      - if:
+          condition:
+            not:
+              voice_assistant.is_running:
+          then:
+            - script.execute: start_wake_word
+            - script.execute: set_idle_or_mute_phase
+            - script.execute: update_ui
+
+voice_assistant:
+  id: va
+  microphone: mic_in
+  media_player: speaker_media_player
+  micro_wake_word: mww
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+  volume_multiplier: 2.0
+  on_listening:
+    - lambda: id(va_phase) = ${phase_listening};
+    - lvgl.label.update:
+        id: lbl_text
+        text: "..."
+    - script.execute: screen_wake
+    - script.execute: update_ui
+  on_stt_vad_end:
+    - lambda: id(va_phase) = ${phase_thinking};
+    - script.execute: update_ui
+  on_stt_end:
+    - lvgl.label.update:
+        id: lbl_text
+        text: !lambda return x;
+  on_tts_start:
+    - lambda: id(va_phase) = ${phase_replying};
+    - lvgl.label.update:
+        id: lbl_text
+        text: !lambda return x;
+    - script.execute: screen_wake
+    - script.execute: update_ui
+  on_end:
+    # Wacht tot het antwoord is uitgesproken en de I2S-bus vrij is.
+    - wait_until:
+        condition:
+          media_player.is_announcing: speaker_media_player
+        timeout: 0.5s
+    - wait_until:
+        condition:
+          and:
+            - not:
+                media_player.is_announcing: speaker_media_player
+            - not:
+                speaker.is_playing: speaker_out
+    - script.execute: start_wake_word
+    - if:
+        condition:
+          lambda: return id(va_phase) != ${phase_error} && id(va_phase) != ${phase_timer_finished};
+        then:
+          - script.execute: set_idle_or_mute_phase
+          - script.execute: update_ui
+          - script.execute: screen_wake
+  on_error:
+    - if:
+        condition:
+          lambda: return !id(init_in_progress);
+        then:
+          - lambda: id(va_phase) = ${phase_error};
+          - lvgl.label.update:
+              id: lbl_text
+              text: !lambda return message;
+          - script.execute: screen_wake
+          - script.execute: update_ui
+          - delay: 3s
+          - if:
+              condition:
+                lambda: return id(va_phase) == ${phase_error};
+              then:
+                - script.execute: set_idle_or_mute_phase
+                - script.execute: update_ui
+  on_client_connected:
+    - lambda: id(init_in_progress) = false;
+    - script.execute: start_wake_word
+    - script.execute: set_idle_or_mute_phase
+    - script.execute: update_ui
+  on_client_disconnected:
+    - script.execute: stop_wake_word
+    - lambda: id(va_phase) = ${phase_not_ready};
+    - script.execute: update_ui
+  on_timer_started:
+    - script.execute: update_timer
+  on_timer_updated:
+    - script.execute: update_timer
+  on_timer_cancelled:
+    - script.execute: update_timer
+  on_timer_tick:
+    - script.execute: update_timer
+  on_timer_finished:
+    - switch.turn_on: timer_ringing
+    - wait_until:
+        condition:
+          media_player.is_announcing: speaker_media_player
+        timeout: 5s
+    - lambda: id(va_phase) = ${phase_timer_finished};
+    - script.execute: screen_wake
+    - script.execute: update_ui
+
+switch:
+  - platform: template
+    id: mute
+    name: Microfoon uit
+    icon: mdi:microphone-off
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+    on_turn_on:
+      - microphone.mute: mic_in
+      - if:
+          condition:
+            lambda: return id(va_phase) == ${phase_idle};
+          then:
+            - lambda: id(va_phase) = ${phase_muted};
+      - script.execute: update_ui
+    on_turn_off:
+      - microphone.unmute: mic_in
+      - if:
+          condition:
+            lambda: return id(va_phase) == ${phase_muted};
+          then:
+            - lambda: id(va_phase) = ${phase_idle};
+      - script.execute: update_ui
+  - platform: template
+    id: timer_ringing
+    optimistic: true
+    internal: true
+    restore_mode: ALWAYS_OFF
+    on_turn_off:
+      # Herhalen uitzetten en het alarmgeluid stoppen
+      - lambda: |-
+          id(speaker_media_player)
+            ->make_call()
+            .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_OFF)
+            .set_announcement(true)
+            .perform();
+          id(speaker_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 0);
+      - media_player.stop:
+          id: speaker_media_player
+          announcement: true
+      - if:
+          condition:
+            lambda: return id(va_phase) == ${phase_timer_finished};
+          then:
+            - script.execute: set_idle_or_mute_phase
+            - script.execute: update_ui
+    on_turn_on:
+      # Alarm herhalen met 1 s pauze, maximaal 15 minuten
+      - lambda: |-
+          id(speaker_media_player)
+            ->make_call()
+            .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_ONE)
+            .set_announcement(true)
+            .perform();
+          id(speaker_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 1000);
+      - media_player.speaker.play_on_device_media_file:
+          media_file: timer_finished_sound
+          announcement: true
+      - delay: 15min
+      - switch.turn_off: timer_ringing
+
+script:
+  - id: start_wake_word
+    then:
+      - if:
+          condition:
+            and:
+              - not:
+                  voice_assistant.is_running:
+              - not:
+                  micro_wake_word.is_running:
+          then:
+            - micro_wake_word.start:
+
+  - id: stop_wake_word
+    then:
+      - micro_wake_word.stop:
+
+  - id: set_idle_or_mute_phase
+    then:
+      - if:
+          condition:
+            switch.is_on: mute
+          then:
+            - lambda: id(va_phase) = ${phase_muted};
+          else:
+            - lambda: id(va_phase) = ${phase_idle};
+
+  # BOOT-knop of microfoonknop op het scherm.
+  - id: talk_pressed
+    then:
+      - if:
+          condition:
+            switch.is_on: timer_ringing
+          then:
+            - switch.turn_off: timer_ringing
+          else:
+            - if:
+                condition:
+                  voice_assistant.is_running:
+                then:
+                  - voice_assistant.stop:
+                else:
+                  - if:
+                      condition:
+                        switch.is_on: mute
+                      then:
+                        # Microfoon staat uit: eerst weer aanzetten.
+                        - switch.turn_off: mute
+                      else:
+                        - if:
+                            condition:
+                              api.connected:
+                            then:
+                              - micro_wake_word.stop:
+                              - voice_assistant.start:
