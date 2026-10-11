@@ -7,6 +7,11 @@ substitutions:
   name: rond-assistent
   friendly_name: Rond Assistent
 
+# Moet in het bestand zelf staan; de rest komt uit de pakketten.
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
 packages:
   # Kies je bord: laat precies ÉÉN regel aanstaan (zie README om je
   # variant te herkennen).

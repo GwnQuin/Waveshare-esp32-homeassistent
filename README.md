@@ -81,10 +81,15 @@ substitutions:
   name: rond-assistent
   friendly_name: Rond Assistent
 
+# Moet in het bestand zelf staan; de rest komt uit de pakketten.
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
 packages:
   rond_assistent:
     url: https://github.com/GwnQuin/Waveshare-esp32-homeassistent
-    ref: main
+    ref: main  # nog geen main-branch? gebruik claude/upbeat-franklin-se5qkd
     refresh: 1d
     files:
       # Kies precies ÉÉN bordbestand:
