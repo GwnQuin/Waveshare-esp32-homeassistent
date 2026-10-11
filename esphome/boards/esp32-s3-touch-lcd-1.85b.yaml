@@ -84,6 +84,10 @@ microphone:
     i2s_audio_id: i2s_bus
     i2s_din_pin: GPIO39
     adc_type: external
+    # De ES7210 zet MIC1 op het linker kanaal; dat is op dit bord altijd een
+    # microfoon (Waveshare's eigen code leest MIC1 als microfoon, MIC3 is de
+    # echo-referentie).
+    channel: left
     sample_rate: 16000
     bits_per_sample: 16bit
 

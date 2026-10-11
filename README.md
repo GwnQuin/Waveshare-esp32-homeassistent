@@ -117,10 +117,11 @@ Assistant (bijvoorbeeld met de add-on *File editor* of *Studio Code Server*).
 Open daarna `rond-assistent.yaml`, zet de juiste `board:`-regel aan en voeg in
 *Secrets* (rechtsboven in ESPHome) een `rond_assistent_api_key` toe.
 
-### Optie C: één compleet bestand (alleen 1.85C V1)
+### Optie C: één compleet bestand (1.85C V1 of V2)
 
-`esphome/compleet-1.85c-v1.yaml` bevat alles in één bestand, zonder pakketten.
-Plak de hele inhoud in je apparaat en vul alleen je eigen `api`-sleutel in.
+`esphome/compleet-1.85c-v1.yaml` en `esphome/compleet-1.85c-v2.yaml` bevatten
+alles in één bestand, zonder pakketten. Plak de hele inhoud in je apparaat en
+vul alleen je eigen `api`-sleutel in.
 
 ### Eerste keer flashen (via USB)
 
@@ -167,7 +168,9 @@ Daar kies je ook het wake word en de Assist-pipeline.
   `esphome/boards/scherm-oud-paneel.yaml` toe onder `files:`, direct ná je
   bordbestand. Dit geldt niet voor de 1.85B.
 - **Geen geluid, of de microfoon reageert niet.** Waarschijnlijk heb je de
-  verkeerde variant gekozen; kijk naar de I2C-scan in stap 1. Op de 1.85C V2 en
+  verkeerde variant gekozen; kijk naar de I2C-scan in stap 1. Met de knop
+  *Testgeluid afspelen* (apparaatpagina > Diagnostiek) test je de speaker los
+  van de spraakassistent. Op de 1.85C V2 en
   de 1.85B moet ook de (verborgen) schakelaar *Versterker* aan staan.
 - **Touch werkt niet** op een 1.85C terwijl je het bestand voor de gewone 1.85
   gebruikt (of andersom): die twee hebben de touch op verschillende pinnen.
@@ -186,6 +189,7 @@ Daar kies je ook het wake word en de Assist-pipeline.
 esphome/
 ├── rond-assistent.yaml          # apparaatbestand (lokale variant)
 ├── compleet-1.85c-v1.yaml       # alles-in-één bestand voor de 1.85C V1
+├── compleet-1.85c-v2.yaml       # alles-in-één bestand voor de 1.85C V2
 ├── boards/                      # hardware per variant
 │   ├── esp32-s3-touch-lcd-1.85.yaml
 │   ├── esp32-s3-touch-lcd-1.85c-v1.yaml

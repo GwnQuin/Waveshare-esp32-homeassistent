@@ -507,6 +507,16 @@ button:
   - platform: restart
     name: Herstarten
     entity_category: diagnostic
+  # Speaker testen zonder de spraakassistent
+  - platform: template
+    name: Testgeluid afspelen
+    icon: mdi:volume-high
+    entity_category: diagnostic
+    on_press:
+      - media_player.speaker.play_on_device_media_file:
+          id: speaker_media_player
+          media_file: timer_finished_sound
+          announcement: true
 
 sensor:
   - platform: wifi_signal
