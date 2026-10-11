@@ -117,6 +117,11 @@ Assistant (bijvoorbeeld met de add-on *File editor* of *Studio Code Server*).
 Open daarna `rond-assistent.yaml`, zet de juiste `board:`-regel aan en voeg in
 *Secrets* (rechtsboven in ESPHome) een `rond_assistent_api_key` toe.
 
+### Optie C: één compleet bestand (alleen 1.85C V1)
+
+`esphome/compleet-1.85c-v1.yaml` bevat alles in één bestand, zonder pakketten.
+Plak de hele inhoud in je apparaat en vul alleen je eigen `api`-sleutel in.
+
 ### Eerste keer flashen (via USB)
 
 1. Sluit het scherm met een USB-C-kabel aan op de computer waarop je Home
@@ -180,6 +185,7 @@ Daar kies je ook het wake word en de Assist-pipeline.
 ```
 esphome/
 ├── rond-assistent.yaml          # apparaatbestand (lokale variant)
+├── compleet-1.85c-v1.yaml       # alles-in-één bestand voor de 1.85C V1
 ├── boards/                      # hardware per variant
 │   ├── esp32-s3-touch-lcd-1.85.yaml
 │   ├── esp32-s3-touch-lcd-1.85c-v1.yaml

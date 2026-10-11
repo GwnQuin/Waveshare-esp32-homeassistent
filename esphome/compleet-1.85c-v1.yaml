@@ -1,0 +1,1006 @@
+# =============================================================================
+# Waveshare ESP32-S3-Touch-LCD-1.85C (hardwareversie V1)
+# als spraakassistent voor Home Assistant - COMPLEET BESTAND
+#
+# Alles staat in dit ene bestand; er zijn geen pakketten of downloads van deze
+# repository nodig. Plak de hele inhoud in je apparaat in de ESPHome Device
+# Builder en pas alleen deze twee dingen aan:
+#   1. api > encryption > key: de sleutel die ESPHome voor je apparaat maakte
+#   2. wifi: zorg dat wifi_ssid en wifi_password in je ESPHome-Secrets staan
+#
+# Vereist ESPHome 2026.9 of nieuwer.
+# Bron: https://github.com/GwnQuin/Waveshare-esp32-homeassistent
+#
+# Scherm   : 1.85" rond 360x360, ST77916 via QSPI
+# Touch    : CST816 (I2C GPIO11/GPIO10)
+# Audio    : I2S MEMS-microfoon + PCM5101 DAC met speaker
+# Overig   : TCA9554 IO-expander (reset scherm/touch)
+#
+# Scherm:  rust = klok + datum, blauw = luisteren, oranje = denken,
+#          groen = antwoord, rood = fout. Tik op de microfoonknop om te praten.
+# =============================================================================
+
+substitutions:
+  name: rond-assistent
+  friendly_name: Rond Assistent
+  phase_idle: "1"
+  phase_listening: "2"
+  phase_thinking: "3"
+  phase_replying: "4"
+  phase_not_ready: "10"
+  phase_error: "11"
+  phase_muted: "12"
+  phase_timer_finished: "20"
+  color_idle: "0x263238"
+  color_listening: "0x2196F3"
+  color_thinking: "0xFF9800"
+  color_replying: "0x4CAF50"
+  color_error: "0xE53935"
+  color_muted: "0x6D1B1B"
+  color_text: "0xFFFFFF"
+  color_text_dim: "0x9E9E9E"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2026.9.0
+  project:
+    name: gwnquin.waveshare-rond-assistent
+    version: "1.0.0"
+  on_boot:
+    - priority: -100
+      then:
+        - script.execute: update_clock
+        - script.execute: update_ui
+        - script.execute: screen_wake
+        # Geef WiFi/HA even de tijd; daarna mogen fouten weer op het scherm.
+        - delay: 30s
+        - lambda: id(init_in_progress) = false;
+        - script.execute: update_ui
+
+esp32:
+  board: esp32-s3-devkitc-1
+  flash_size: 16MB
+  cpu_frequency: 240MHz
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+
+api:
+  encryption:
+    key: "PLAK-HIER-JE-EIGEN-SLEUTEL"
+  on_client_connected:
+    - script.execute: update_ui
+  on_client_disconnected:
+    - script.execute: update_ui
+
+ota:
+  - platform: esphome
+    id: ota_esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap: {}
+  on_connect:
+    - script.execute: update_ui
+  on_disconnect:
+    - script.execute: update_ui
+
+captive_portal:
+
+time:
+  - platform: homeassistant
+    id: ha_time
+    on_time_sync:
+      - script.execute: update_clock
+    on_time:
+      - seconds: 0
+        then:
+          - script.execute: update_clock
+
+globals:
+  - id: init_in_progress
+    type: bool
+    restore_value: false
+    initial_value: "true"
+  - id: va_phase
+    type: int
+    restore_value: false
+    initial_value: ${phase_not_ready}
+  - id: timer_active
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: timer_text
+    type: std::string
+    restore_value: false
+
+i2c:
+  - id: i2c_main
+    sda: GPIO11
+    scl: GPIO10
+    # Toont bij het opstarten welke chips er zijn (zie de logs).
+    scan: true
+
+pca9554:
+  - id: io_expander
+    i2c_id: i2c_main
+    address: 0x20
+
+spi:
+  - id: lcd_qspi
+    type: quad
+    clk_pin: GPIO40
+    data_pins:
+      - number: GPIO46
+        ignore_strapping_warning: true
+      - number: GPIO45
+        ignore_strapping_warning: true
+      - GPIO42
+      - GPIO41
+
+display:
+  - platform: mipi_spi
+    id: lcd
+    # Waveshare's "nieuwe" ST77916-init (zelfde als ESPHome's ESP-VOCAT).
+    # Ruis of strepen? Zie "scherm-oud-paneel.yaml" in de repository.
+    model: ESP-VOCAT
+    spi_id: lcd_qspi
+    cs_pin: GPIO21
+    # EXIO2 op de TCA9554 (bit 1) = LCD reset
+    reset_pin:
+      pca9554: io_expander
+      number: 1
+    auto_clear_enabled: false
+    update_interval: never
+
+touchscreen:
+  - platform: cst816
+    id: touch
+    i2c_id: i2c_main
+    interrupt_pin: GPIO4
+    # EXIO1 op de TCA9554 (bit 0) = touch reset
+    reset_pin:
+      pca9554: io_expander
+      number: 0
+    on_touch:
+      - script.execute: screen_touched
+
+# --- Audio: aparte I2S-bussen voor microfoon en speaker (full duplex) ---
+i2s_audio:
+  - id: i2s_mic_bus
+    i2s_lrclk_pin: GPIO2
+    i2s_bclk_pin: GPIO15
+  - id: i2s_speaker_bus
+    i2s_lrclk_pin: GPIO38
+    i2s_bclk_pin: GPIO48
+
+microphone:
+  - platform: i2s_audio
+    id: mic_in
+    i2s_audio_id: i2s_mic_bus
+    i2s_din_pin: GPIO39
+    adc_type: external
+    pdm: false
+    channel: right
+    sample_rate: 16000
+    # De MEMS-microfoon wil minimaal ~1 MHz bitklok: 32-bit slots bij 16 kHz.
+    bits_per_sample: 32bit
+
+speaker:
+  - platform: i2s_audio
+    id: speaker_out
+    i2s_audio_id: i2s_speaker_bus
+    i2s_dout_pin: GPIO47
+    dac_type: external
+    sample_rate: 48000
+    bits_per_sample: 16bit
+    buffer_duration: 100ms
+
+media_player:
+  - platform: speaker
+    id: speaker_media_player
+    name: None
+    volume_min: 0.4
+    volume_max: 0.85
+    announcement_pipeline:
+      speaker: speaker_out
+      format: FLAC
+      sample_rate: 48000
+      num_channels: 1
+    files:
+      - id: timer_finished_sound
+        file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/timer_finished.flac
+    on_announcement:
+      # Op borden met één gedeelde I2S-bus kan de microfoon niet tegelijk
+      # met de speaker draaien: wake word tijdelijk stoppen.
+      - if:
+          condition:
+            microphone.is_capturing: mic_in
+          then:
+            - micro_wake_word.stop:
+      # Mededeling vanuit Home Assistant (geen gesprek): scherm aan.
+      - if:
+          condition:
+            not:
+              voice_assistant.is_running:
+          then:
+            - script.execute: screen_wake
+    on_idle:
+      # Einde van een mededeling buiten een gesprek: wake word weer aan.
+      - if:
+          condition:
+            not:
+              voice_assistant.is_running:
+          then:
+            - script.execute: start_wake_word
+            - script.execute: set_idle_or_mute_phase
+            - script.execute: update_ui
+
+micro_wake_word:
+  id: mww
+  microphone: mic_in
+  # Kies in Home Assistant welk wake word actief is (apparaatpagina >
+  # Assist-satelliet > Wake word).
+  models:
+    - model: okay_nabu
+      id: okay_nabu
+    - model: hey_jarvis
+      id: hey_jarvis
+    - model: hey_mycroft
+      id: hey_mycroft
+  on_wake_word_detected:
+    - script.execute: screen_wake
+    - voice_assistant.start:
+        wake_word: !lambda return wake_word;
+
+voice_assistant:
+  id: va
+  microphone: mic_in
+  media_player: speaker_media_player
+  micro_wake_word: mww
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+  volume_multiplier: 2.0
+  on_listening:
+    - lambda: id(va_phase) = ${phase_listening};
+    - lvgl.label.update:
+        id: lbl_text
+        text: "..."
+    - script.execute: screen_wake
+    - script.execute: update_ui
+  on_stt_vad_end:
+    - lambda: id(va_phase) = ${phase_thinking};
+    - script.execute: update_ui
+  on_stt_end:
+    - lvgl.label.update:
+        id: lbl_text
+        text: !lambda return x;
+  on_tts_start:
+    - lambda: id(va_phase) = ${phase_replying};
+    - lvgl.label.update:
+        id: lbl_text
+        text: !lambda return x;
+    - script.execute: screen_wake
+    - script.execute: update_ui
+  on_end:
+    # Wacht tot het antwoord is uitgesproken en de I2S-bus vrij is.
+    - wait_until:
+        condition:
+          media_player.is_announcing: speaker_media_player
+        timeout: 0.5s
+    - wait_until:
+        condition:
+          and:
+            - not:
+                media_player.is_announcing: speaker_media_player
+            - not:
+                speaker.is_playing: speaker_out
+    - script.execute: start_wake_word
+    - if:
+        condition:
+          lambda: return id(va_phase) != ${phase_error} && id(va_phase) != ${phase_timer_finished};
+        then:
+          - script.execute: set_idle_or_mute_phase
+          - script.execute: update_ui
+          - script.execute: screen_wake
+  on_error:
+    - if:
+        condition:
+          lambda: return !id(init_in_progress);
+        then:
+          - lambda: id(va_phase) = ${phase_error};
+          - lvgl.label.update:
+              id: lbl_text
+              text: !lambda return message;
+          - script.execute: screen_wake
+          - script.execute: update_ui
+          - delay: 3s
+          - if:
+              condition:
+                lambda: return id(va_phase) == ${phase_error};
+              then:
+                - script.execute: set_idle_or_mute_phase
+                - script.execute: update_ui
+  on_client_connected:
+    - lambda: id(init_in_progress) = false;
+    - script.execute: start_wake_word
+    - script.execute: set_idle_or_mute_phase
+    - script.execute: update_ui
+  on_client_disconnected:
+    - script.execute: stop_wake_word
+    - lambda: id(va_phase) = ${phase_not_ready};
+    - script.execute: update_ui
+  on_timer_started:
+    - script.execute: update_timer
+  on_timer_updated:
+    - script.execute: update_timer
+  on_timer_cancelled:
+    - script.execute: update_timer
+  on_timer_tick:
+    - script.execute: update_timer
+  on_timer_finished:
+    - switch.turn_on: timer_ringing
+    - wait_until:
+        condition:
+          media_player.is_announcing: speaker_media_player
+        timeout: 5s
+    - lambda: id(va_phase) = ${phase_timer_finished};
+    - script.execute: screen_wake
+    - script.execute: update_ui
+
+# --- Achtergrondverlichting (GPIO5 op alle varianten) ---
+output:
+  - platform: ledc
+    id: backlight_output
+    pin: GPIO5
+
+light:
+  - platform: monochromatic
+    id: backlight
+    name: Scherm
+    icon: mdi:television
+    output: backlight_output
+    restore_mode: ALWAYS_ON
+    default_transition_length: 250ms
+
+number:
+  - platform: template
+    id: screen_brightness
+    name: Schermhelderheid
+    icon: mdi:brightness-6
+    entity_category: config
+    unit_of_measurement: "%"
+    min_value: 10
+    max_value: 100
+    step: 5
+    initial_value: 80
+    optimistic: true
+    restore_value: true
+    on_value:
+      - script.execute: screen_wake
+  - platform: template
+    id: screen_dim_brightness
+    name: Helderheid in rust
+    icon: mdi:brightness-4
+    entity_category: config
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 5
+    initial_value: 10
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: screen_timeout
+    name: Scherm dimmen na
+    icon: mdi:timer-sand
+    entity_category: config
+    unit_of_measurement: s
+    min_value: 5
+    max_value: 600
+    step: 5
+    initial_value: 30
+    optimistic: true
+    restore_value: true
+
+switch:
+  - platform: template
+    id: mute
+    name: Microfoon uit
+    icon: mdi:microphone-off
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+    on_turn_on:
+      - microphone.mute: mic_in
+      - if:
+          condition:
+            lambda: return id(va_phase) == ${phase_idle};
+          then:
+            - lambda: id(va_phase) = ${phase_muted};
+      - script.execute: update_ui
+    on_turn_off:
+      - microphone.unmute: mic_in
+      - if:
+          condition:
+            lambda: return id(va_phase) == ${phase_muted};
+          then:
+            - lambda: id(va_phase) = ${phase_idle};
+      - script.execute: update_ui
+  - platform: template
+    id: timer_ringing
+    optimistic: true
+    internal: true
+    restore_mode: ALWAYS_OFF
+    on_turn_off:
+      # Herhalen uitzetten en het alarmgeluid stoppen
+      - lambda: |-
+          id(speaker_media_player)
+            ->make_call()
+            .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_OFF)
+            .set_announcement(true)
+            .perform();
+          id(speaker_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 0);
+      - media_player.stop:
+          id: speaker_media_player
+          announcement: true
+      - if:
+          condition:
+            lambda: return id(va_phase) == ${phase_timer_finished};
+          then:
+            - script.execute: set_idle_or_mute_phase
+            - script.execute: update_ui
+    on_turn_on:
+      # Alarm herhalen met 1 s pauze, maximaal 15 minuten
+      - lambda: |-
+          id(speaker_media_player)
+            ->make_call()
+            .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_ONE)
+            .set_announcement(true)
+            .perform();
+          id(speaker_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 1000);
+      - media_player.speaker.play_on_device_media_file:
+          media_file: timer_finished_sound
+          announcement: true
+      - delay: 15min
+      - switch.turn_off: timer_ringing
+
+# --- BOOT-knop (GPIO0, aanwezig op alle varianten) ---
+#   kort drukken : praten / stoppen / timer-alarm uitzetten
+#   1 s vasthouden: microfoon aan/uit
+binary_sensor:
+  - platform: gpio
+    id: boot_button
+    pin:
+      number: GPIO0
+      inverted: true
+      ignore_strapping_warning: true
+      mode:
+        input: true
+        pullup: true
+    internal: true
+    on_multi_click:
+      - timing:
+          - ON for at most 800ms
+          - OFF for at least 50ms
+        then:
+          - script.execute: screen_wake
+          - script.execute: talk_pressed
+      - timing:
+          - ON for at least 1s
+        then:
+          - script.execute: screen_wake
+          - switch.toggle: mute
+
+button:
+  - platform: restart
+    name: Herstarten
+    entity_category: diagnostic
+
+sensor:
+  - platform: wifi_signal
+    name: WiFi-signaal
+    update_interval: 60s
+    entity_category: diagnostic
+
+font:
+  - file:
+      type: gfonts
+      family: Figtree
+      weight: 600
+    id: font_clock
+    size: 88
+    glyphs: "0123456789:-"
+  - file:
+      type: gfonts
+      family: Figtree
+      weight: 600
+    id: font_title
+    size: 26
+    glyphsets: [GF_Latin_Core]
+  - file: gfonts://Figtree
+    id: font_text
+    size: 22
+    glyphsets: [GF_Latin_Core]
+  - file: gfonts://Figtree
+    id: font_small
+    size: 18
+    glyphsets: [GF_Latin_Core]
+  # Material Symbols, codepoints uit MaterialSymbolsOutlined.codepoints
+  - file: gfonts://Material+Symbols+Outlined
+    id: font_icons
+    size: 30
+    glyphs:
+      - "\U0000e31d" # mic
+      - "\U0000e02b" # mic_off
+      - "\U0000e648" # wifi_off
+      - "\U0000e16f" # link_off
+      - "\U0000e425" # timer
+  - file: gfonts://Material+Symbols+Outlined
+    id: font_icons_big
+    size: 44
+    glyphs:
+      - "\U0000e31d" # mic
+      - "\U0000e02b" # mic_off
+      - "\U0000e047" # stop
+
+lvgl:
+  id: lvgl_ui
+  displays:
+    - lcd
+  touchscreens:
+    - touch
+  bg_color: 0x000000
+  text_color: ${color_text}
+  default_font: font_text
+  pages:
+    - id: main_page
+      bg_color: 0x000000
+      scrollable: false
+      widgets:
+        # Gekleurde ring langs de rand van het ronde scherm
+        - obj:
+            id: ring
+            align: CENTER
+            width: 356
+            height: 356
+            radius: 178
+            bg_opa: TRANSP
+            border_width: 8
+            border_color: ${color_idle}
+            pad_all: 0
+            scrollable: false
+            clickable: false
+        # Draaiende ring tijdens "denken"
+        - spinner:
+            id: spinner
+            align: CENTER
+            width: 356
+            height: 356
+            spin_time: 1200ms
+            arc_length: 80deg
+            arc_opa: TRANSP
+            arc_width: 8
+            indicator:
+              arc_color: ${color_thinking}
+              arc_width: 8
+            hidden: true
+            clickable: false
+
+        # Statusicoon bovenaan (geen WiFi / geen HA / microfoon uit)
+        - label:
+            id: lbl_icons
+            align: TOP_MID
+            y: 34
+            text_font: font_icons
+            text: ""
+        - label:
+            id: lbl_battery
+            align: TOP_MID
+            y: 70
+            text_font: font_small
+            text_color: ${color_text_dim}
+            text: ""
+            hidden: true
+
+        # Statusregel ("Luisteren...", "Timer klaar!", ...)
+        - label:
+            id: lbl_status
+            align: TOP_MID
+            y: 96
+            text_font: font_title
+            text: ""
+            hidden: true
+
+        # Klok en datum (rust)
+        - label:
+            id: lbl_time
+            align: CENTER
+            y: -28
+            text_font: font_clock
+            text: "--:--"
+        - label:
+            id: lbl_date
+            align: CENTER
+            y: 38
+            text_font: font_text
+            text_color: ${color_text_dim}
+            text: ""
+        - label:
+            id: lbl_timer
+            align: CENTER
+            y: 76
+            text_font: font_title
+            text_color: ${color_thinking}
+            text: ""
+            hidden: true
+
+        # Vraag / antwoord / foutmelding
+        - label:
+            id: lbl_text
+            align: CENTER
+            y: 20
+            width: 270
+            height: 170
+            text_font: font_text
+            text_align: CENTER
+            long_mode: DOT
+            text: ""
+            hidden: true
+
+        # Microfoonknop: tikken om te praten
+        - button:
+            id: btn_talk
+            align: BOTTOM_MID
+            y: -26
+            width: 76
+            height: 76
+            radius: 38
+            bg_color: ${color_listening}
+            shadow_width: 0
+            on_click:
+              - script.execute: talk_pressed
+            widgets:
+              - label:
+                  id: lbl_talk_icon
+                  align: CENTER
+                  text_font: font_icons_big
+                  text: "\U0000e31d"
+
+script:
+  # Scherm aan op volle helderheid en (opnieuw) de dim-timer starten.
+  - id: screen_wake
+    mode: restart
+    then:
+      - lvgl.resume:
+      - light.turn_on:
+          id: backlight
+          brightness: !lambda return id(screen_brightness).state / 100.0f;
+      - delay: !lambda return (uint32_t) (id(screen_timeout).state * 1000.0f);
+      # Niet dimmen terwijl de assistent bezig is of een timer afgaat.
+      - wait_until:
+          condition:
+            lambda: |-
+              return id(va_phase) == ${phase_idle} ||
+                     id(va_phase) == ${phase_muted} ||
+                     id(va_phase) == ${phase_not_ready};
+      - if:
+          condition:
+            lambda: return id(screen_dim_brightness).state > 0.0f;
+          then:
+            - light.turn_on:
+                id: backlight
+                brightness: !lambda return id(screen_dim_brightness).state / 100.0f;
+          else:
+            - light.turn_off: backlight
+            - delay: 500ms
+            - lvgl.pause:
+  - id: start_wake_word
+    then:
+      - if:
+          condition:
+            and:
+              - not:
+                  voice_assistant.is_running:
+              - not:
+                  micro_wake_word.is_running:
+          then:
+            - micro_wake_word.start:
+
+  - id: stop_wake_word
+    then:
+      - micro_wake_word.stop:
+
+  - id: set_idle_or_mute_phase
+    then:
+      - if:
+          condition:
+            switch.is_on: mute
+          then:
+            - lambda: id(va_phase) = ${phase_muted};
+          else:
+            - lambda: id(va_phase) = ${phase_idle};
+
+  # BOOT-knop of microfoonknop op het scherm.
+  - id: talk_pressed
+    then:
+      - if:
+          condition:
+            switch.is_on: timer_ringing
+          then:
+            - switch.turn_off: timer_ringing
+          else:
+            - if:
+                condition:
+                  voice_assistant.is_running:
+                then:
+                  - voice_assistant.stop:
+                else:
+                  - if:
+                      condition:
+                        switch.is_on: mute
+                      then:
+                        # Microfoon staat uit: eerst weer aanzetten.
+                        - switch.turn_off: mute
+                      else:
+                        - if:
+                            condition:
+                              api.connected:
+                            then:
+                              - micro_wake_word.stop:
+                              - voice_assistant.start:
+  # Tik op het scherm: altijd eerst het scherm aanzetten; een afgaande
+  # timer stoppen.
+  - id: screen_touched
+    then:
+      - script.execute: screen_wake
+      - if:
+          condition:
+            switch.is_on: timer_ringing
+          then:
+            - switch.turn_off: timer_ringing
+
+  - id: update_clock
+    then:
+      - lvgl.label.update:
+          id: lbl_time
+          text: !lambda |-
+            auto now = id(ha_time).now();
+            if (!now.is_valid())
+              return std::string("--:--");
+            return now.strftime("%H:%M");
+      - lvgl.label.update:
+          id: lbl_date
+          text: !lambda |-
+            static const char *const days[] = {"zondag", "maandag", "dinsdag", "woensdag",
+                                               "donderdag", "vrijdag", "zaterdag"};
+            static const char *const months[] = {"januari", "februari", "maart", "april",
+                                                 "mei", "juni", "juli", "augustus",
+                                                 "september", "oktober", "november", "december"};
+            auto now = id(ha_time).now();
+            if (!now.is_valid())
+              return std::string("");
+            return str_sprintf("%s %d %s", days[now.day_of_week - 1], now.day_of_month,
+                               months[now.month - 1]);
+
+  # Resterende tijd van de eerstvolgende actieve timer onder de klok.
+  - id: update_timer
+    then:
+      - lambda: |-
+          bool found = false;
+          unsigned left = 0;
+          for (const auto &timer : id(va).get_timers()) {
+            if (timer.is_active && (!found || timer.seconds_left < left)) {
+              left = timer.seconds_left;
+              found = true;
+            }
+          }
+          id(timer_active) = found;
+          unsigned h = left / 3600, m = (left % 3600) / 60, s = left % 60;
+          if (!found)
+            id(timer_text) = "";
+          else if (h > 0)
+            id(timer_text) = str_sprintf("Timer %u:%02u:%02u", h, m, s);
+          else
+            id(timer_text) = str_sprintf("Timer %02u:%02u", m, s);
+      - lvgl.label.update:
+          id: lbl_timer
+          text: !lambda return id(timer_text);
+      - if:
+          condition:
+            lambda: |-
+              bool idle = id(va_phase) == ${phase_idle} || id(va_phase) == ${phase_muted};
+              return idle && id(timer_active);
+          then:
+            - lvgl.widget.show: lbl_timer
+          else:
+            - lvgl.widget.hide: lbl_timer
+
+  # Zet het scherm in de juiste toestand voor de huidige fase.
+  - id: update_ui
+    then:
+      # --- Statusicoon ---
+      - if:
+          condition:
+            not:
+              wifi.connected:
+          then:
+            - lvgl.label.update:
+                id: lbl_icons
+                text: "\U0000e648"
+                text_color: ${color_error}
+          else:
+            - if:
+                condition:
+                  not:
+                    api.connected:
+                then:
+                  - lvgl.label.update:
+                      id: lbl_icons
+                      text: "\U0000e16f"
+                      text_color: ${color_thinking}
+                else:
+                  - if:
+                      condition:
+                        switch.is_on: mute
+                      then:
+                        - lvgl.label.update:
+                            id: lbl_icons
+                            text: "\U0000e02b"
+                            text_color: ${color_error}
+                      else:
+                        - lvgl.label.update:
+                            id: lbl_icons
+                            text: ""
+
+      # --- Rust / microfoon uit / geen verbinding: klok tonen ---
+      - if:
+          condition:
+            lambda: |-
+              return id(va_phase) == ${phase_idle} ||
+                     id(va_phase) == ${phase_muted} ||
+                     id(va_phase) == ${phase_not_ready};
+          then:
+            - lvgl.widget.hide: [spinner, lbl_text]
+            - lvgl.widget.show: [lbl_time, lbl_date, btn_talk]
+            - script.execute: update_timer
+      - if:
+          condition:
+            lambda: return id(va_phase) == ${phase_idle};
+          then:
+            - lvgl.widget.update:
+                id: ring
+                border_color: ${color_idle}
+            - lvgl.widget.hide: lbl_status
+            - lvgl.widget.update:
+                id: btn_talk
+                bg_color: ${color_listening}
+            - lvgl.label.update:
+                id: lbl_talk_icon
+                text: "\U0000e31d"
+      - if:
+          condition:
+            lambda: return id(va_phase) == ${phase_muted};
+          then:
+            - lvgl.widget.update:
+                id: ring
+                border_color: ${color_muted}
+            - lvgl.label.update:
+                id: lbl_status
+                text: "Microfoon uit"
+                text_color: ${color_error}
+            - lvgl.widget.show: lbl_status
+            - lvgl.widget.update:
+                id: btn_talk
+                bg_color: ${color_muted}
+            - lvgl.label.update:
+                id: lbl_talk_icon
+                text: "\U0000e02b"
+      - if:
+          condition:
+            lambda: return id(va_phase) == ${phase_not_ready};
+          then:
+            - lvgl.widget.update:
+                id: ring
+                border_color: ${color_idle}
+            - lvgl.label.update:
+                id: lbl_status
+                text: !lambda |-
+                  if (id(init_in_progress))
+                    return std::string("Opstarten...");
+                  return std::string("Geen verbinding");
+                text_color: ${color_text_dim}
+            - lvgl.widget.show: lbl_status
+            - lvgl.widget.update:
+                id: btn_talk
+                bg_color: ${color_idle}
+            - lvgl.label.update:
+                id: lbl_talk_icon
+                text: "\U0000e31d"
+
+      # --- Gesprek: vraag/antwoord in beeld ---
+      - if:
+          condition:
+            lambda: |-
+              return id(va_phase) == ${phase_listening} ||
+                     id(va_phase) == ${phase_thinking} ||
+                     id(va_phase) == ${phase_replying} ||
+                     id(va_phase) == ${phase_error} ||
+                     id(va_phase) == ${phase_timer_finished};
+          then:
+            - lvgl.widget.hide: [lbl_time, lbl_date, lbl_timer, btn_talk]
+            - lvgl.widget.show: [lbl_status, lbl_text]
+      - if:
+          condition:
+            lambda: return id(va_phase) == ${phase_listening};
+          then:
+            - lvgl.widget.hide: spinner
+            - lvgl.widget.update:
+                id: ring
+                border_color: ${color_listening}
+            - lvgl.label.update:
+                id: lbl_status
+                text: "Luisteren..."
+                text_color: ${color_listening}
+      - if:
+          condition:
+            lambda: return id(va_phase) == ${phase_thinking};
+          then:
+            - lvgl.widget.update:
+                id: ring
+                border_color: ${color_idle}
+            - lvgl.widget.show: spinner
+            - lvgl.label.update:
+                id: lbl_status
+                text: "Even denken..."
+                text_color: ${color_thinking}
+      - if:
+          condition:
+            lambda: return id(va_phase) == ${phase_replying};
+          then:
+            - lvgl.widget.hide: spinner
+            - lvgl.widget.update:
+                id: ring
+                border_color: ${color_replying}
+            - lvgl.label.update:
+                id: lbl_status
+                text: "Antwoord"
+                text_color: ${color_replying}
+      - if:
+          condition:
+            lambda: return id(va_phase) == ${phase_error};
+          then:
+            - lvgl.widget.hide: spinner
+            - lvgl.widget.update:
+                id: ring
+                border_color: ${color_error}
+            - lvgl.label.update:
+                id: lbl_status
+                text: "Er ging iets mis"
+                text_color: ${color_error}
+      - if:
+          condition:
+            lambda: return id(va_phase) == ${phase_timer_finished};
+          then:
+            - lvgl.widget.hide: spinner
+            - lvgl.widget.update:
+                id: ring
+                border_color: ${color_thinking}
+            - lvgl.label.update:
+                id: lbl_status
+                text: "Timer klaar!"
+                text_color: ${color_thinking}
+            - lvgl.label.update:
+                id: lbl_text
+                text: "Tik op het scherm om het alarm te stoppen"
