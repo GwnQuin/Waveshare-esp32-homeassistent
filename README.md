@@ -179,6 +179,9 @@ Anthropic) bij *Instructies* iets als:
 > maximaal twee korte zinnen. Gebruik geen opsommingen, emoji of opmaak; je
 > antwoord wordt hardop voorgelezen en op een klein rond scherm getoond.
 
+**Achtergrondkleur.** Pas `color_background` aan bij `substitutions:`
+(bijvoorbeeld `"0x000000"` voor zwart).
+
 **Het weer.** Het scherm toont het weer van `weather.forecast_home` (de
 standaard Met.no-integratie). Heet jouw weer-entiteit anders, pas dan
 `weather_entity` aan bij `substitutions:`. Voor de **verwachting** op de
@@ -220,7 +223,9 @@ sequence:
 - **Geen geluid, of de microfoon reageert niet.** Waarschijnlijk heb je de
   verkeerde variant gekozen; kijk naar de I2C-scan in stap 1. Met de knop
   *Testgeluid afspelen* (apparaatpagina > Diagnostiek) test je de speaker los
-  van de spraakassistent. Op de 1.85C V2 en
+  van de spraakassistent. De sensor *Microfoon niveau* laat zien of de
+  microfoon geluid oppikt: in stilte ongeveer -70 dB, als je praat -40 tot
+  -20 dB. Blijft hij laag of leeg, stuur dan de logs mee. Op de 1.85C V2 en
   de 1.85B moet ook de (verborgen) schakelaar *Versterker* aan staan.
 - **Touch werkt niet** op een 1.85C terwijl je het bestand voor de gewone 1.85
   gebruikt (of andersom): die twee hebben de touch op verschillende pinnen.

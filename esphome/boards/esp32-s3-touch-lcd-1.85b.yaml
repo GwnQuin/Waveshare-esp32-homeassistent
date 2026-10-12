@@ -70,6 +70,9 @@ audio_adc:
     i2c_id: i2c_main
     bits_per_sample: 16bit
     sample_rate: 16000
+    # Waveshare's eigen spraakvoorbeeld gebruikt 36 dB; met de standaard
+    # 24 dB is de microfoon te zacht voor het wake word.
+    mic_gain: 36db
 
 audio_dac:
   - platform: es8311

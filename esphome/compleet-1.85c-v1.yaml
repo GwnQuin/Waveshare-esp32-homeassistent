@@ -42,7 +42,9 @@ substitutions:
   weather_entity: weather.forecast_home
   color_idle: "0x263238"
   color_listening: "0x2196F3"
-  color_listening_dark: "0x1565C0"
+  # Achtergrondkleur van de pagina's (egaal; kleurverlopen geven strepen
+  # op dit scherm). Bijvoorbeeld "0x000000" voor zwart.
+  color_background: "0x0B1220"
   color_thinking: "0xFF9800"
   color_replying: "0x4CAF50"
   color_error: "0xE53935"
@@ -175,9 +177,14 @@ globals:
   - id: weather_tint
     type: uint32_t
     restore_value: false
-    initial_value: "0x101820"
+    initial_value: ${color_background}
   # Weersverwachting (max. 4 dagen), gevuld door fetch_forecast
   - id: fc_count
+    type: int
+    restore_value: false
+    initial_value: "0"
+  # 0 = nog niet opgehaald, 1 = gelukt, 2 = geen antwoord van Home Assistant
+  - id: forecast_state
     type: int
     restore_value: false
     initial_value: "0"
@@ -609,6 +616,16 @@ sensor:
     name: WiFi-signaal
     update_interval: 60s
     entity_category: diagnostic
+  - platform: sound_level
+    microphone: mic_in
+    passive: true
+    measurement_duration: 2s
+    peak:
+      name: Microfoon piek
+      entity_category: diagnostic
+    rms:
+      name: Microfoon niveau
+      entity_category: diagnostic
   - platform: homeassistant
     id: weather_temperature
     entity_id: ${weather_entity}
@@ -756,9 +773,7 @@ lvgl:
                 column: 1
                 dir: HOR
                 bg_opa: COVER
-                bg_color: 0x0D1B2A
-                bg_grad_color: 0x000000
-                bg_grad_dir: VER
+                bg_color: ${color_background}
                 scrollable: false
                 widgets:
                   - obj:
@@ -854,11 +869,7 @@ lvgl:
                       height: 68
                       radius: 34
                       bg_color: ${color_listening}
-                      bg_grad_color: ${color_listening_dark}
-                      bg_grad_dir: VER
-                      shadow_width: 18
-                      shadow_color: ${color_listening}
-                      shadow_opa: 40%
+                      shadow_width: 0
                       on_click:
                         - script.execute: talk_pressed
                       widgets:
@@ -908,9 +919,7 @@ lvgl:
                 column: 0
                 dir: RIGHT
                 bg_opa: COVER
-                bg_color: 0x1A1A2E
-                bg_grad_color: 0x000000
-                bg_grad_dir: VER
+                bg_color: ${color_background}
                 scrollable: false
                 widgets:
                   - label:
@@ -1034,9 +1043,7 @@ lvgl:
                 column: 2
                 dir: LEFT
                 bg_opa: COVER
-                bg_color: 0x101820
-                bg_grad_color: 0x000000
-                bg_grad_dir: VER
+                bg_color: ${color_background}
                 scrollable: false
                 widgets:
                   - obj:
@@ -1261,6 +1268,17 @@ lvgl:
                                   id: fc_temp_3
                                   text_font: font_small
                                   text: ""
+                  - label:
+                      id: wx_hint
+                      align: TOP_MID
+                      y: 226
+                      width: 240
+                      text_align: CENTER
+                      long_mode: WRAP
+                      text_font: font_small
+                      text_color: ${color_text_dim}
+                      text: ""
+                      hidden: true
                   - obj:
                       align: BOTTOM_MID
                       y: -6
@@ -1287,9 +1305,7 @@ lvgl:
             width: 360
             height: 360
             radius: 180
-            bg_color: 0x000000
-            bg_grad_color: 0x0A1420
-            bg_grad_dir: VER
+            bg_color: ${color_background}
             border_width: 0
             pad_all: 0
             scrollable: false
@@ -1498,7 +1514,8 @@ script:
             - light.turn_off: backlight
             - delay: 500ms
             - lvgl.pause:
-      # Na het dimmen terug naar de Home-pagina.
+      # Na nog 2 minuten zonder aanraking terug naar de Home-pagina.
+      - delay: 2min
       - lvgl.tileview.select:
           id: tiles
           column: 1
@@ -1681,7 +1698,11 @@ script:
                   entity_id: ${weather_entity}
                   type: daily
                 capture_response: true
+                on_error:
+                  - lambda: id(forecast_state) = 2;
+                  - script.execute: update_weather
                 on_success:
+                  - lambda: id(forecast_state) = 1;
                   - lambda: |-
                       static const char *const days[] = {"zo", "ma", "di", "wo", "do", "vr", "za"};
                       static const int month_offset[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
@@ -1714,6 +1735,15 @@ script:
                       }
                       id(fc_count) = count;
                   - script.execute: update_weather
+            # Geen antwoord binnen 10 s (meestal: apparaat mag geen acties
+            # uitvoeren in Home Assistant)? Dan een uitleg tonen.
+            - delay: 10s
+            - if:
+                condition:
+                  lambda: return id(forecast_state) != 1;
+                then:
+                  - lambda: id(forecast_state) = 2;
+            - script.execute: update_weather
 
   # Weer-icoon, kleuren, temperatuur, details en verwachting bijwerken.
   - id: update_weather
@@ -1731,21 +1761,21 @@ script:
                   uint32_t tint;
                 };
                 static const Condition conditions[] = {
-                    {"sunny", "\U0000f157", "Zonnig", 0xFFC107, 0x3A2A00},
-                    {"clear-night", "\U0000f159", "Helder", 0x9FA8DA, 0x141A33},
-                    {"partlycloudy", "\U0000f172", "Half bewolkt", 0xFFD54F, 0x2A2A1A},
-                    {"cloudy", "\U0000f15c", "Bewolkt", 0xB0BEC5, 0x1E272C},
-                    {"fog", "\U0000e818", "Mist", 0x90A4AE, 0x22292D},
-                    {"rainy", "\U0000f176", "Regen", 0x4FC3F7, 0x0A2533},
-                    {"pouring", "\U0000f61f", "Stortregen", 0x29B6F6, 0x061C2B},
-                    {"snowy", "\U0000e2cd", "Sneeuw", 0xE1F5FE, 0x26323A},
-                    {"snowy-rainy", "\U0000f60b", "Natte sneeuw", 0x81D4FA, 0x1A2A35},
-                    {"hail", "\U0000f67f", "Hagel", 0xB3E5FC, 0x1A2A35},
-                    {"lightning", "\U0000ebdb", "Onweer", 0xFFEB3B, 0x251E3A},
-                    {"lightning-rainy", "\U0000ebdb", "Onweersbuien", 0xFFEB3B, 0x1E1A33},
-                    {"windy", "\U0000efd8", "Winderig", 0x80CBC4, 0x0F2A28},
-                    {"windy-variant", "\U0000efd8", "Winderig", 0x80CBC4, 0x0F2A28},
-                    {"exceptional", "\U0000f083", "Uitzonderlijk", 0xFF7043, 0x331A10},
+                    {"sunny", "\U0000f157", "Zonnig", 0xFFC107, 0x1F1A0A},
+                    {"clear-night", "\U0000f159", "Helder", 0x9FA8DA, 0x0E1226},
+                    {"partlycloudy", "\U0000f172", "Half bewolkt", 0xFFD54F, 0x18180F},
+                    {"cloudy", "\U0000f15c", "Bewolkt", 0xB0BEC5, 0x141B20},
+                    {"fog", "\U0000e818", "Mist", 0x90A4AE, 0x161C20},
+                    {"rainy", "\U0000f176", "Regen", 0x4FC3F7, 0x0A1A26},
+                    {"pouring", "\U0000f61f", "Stortregen", 0x29B6F6, 0x071622},
+                    {"snowy", "\U0000e2cd", "Sneeuw", 0xE1F5FE, 0x18222A},
+                    {"snowy-rainy", "\U0000f60b", "Natte sneeuw", 0x81D4FA, 0x121E28},
+                    {"hail", "\U0000f67f", "Hagel", 0xB3E5FC, 0x121E28},
+                    {"lightning", "\U0000ebdb", "Onweer", 0xFFEB3B, 0x18142A},
+                    {"lightning-rainy", "\U0000ebdb", "Onweersbuien", 0xFFEB3B, 0x151226},
+                    {"windy", "\U0000efd8", "Winderig", 0x80CBC4, 0x0B1E1C},
+                    {"windy-variant", "\U0000efd8", "Winderig", 0x80CBC4, 0x0B1E1C},
+                    {"exceptional", "\U0000f083", "Uitzonderlijk", 0xFF7043, 0x22140C},
                 };
                 auto find = [](const std::string &state) -> const Condition * {
                   for (const auto &c : conditions) {
@@ -1758,7 +1788,7 @@ script:
                 // Huidig weer: Home en pagina Weer
                 const Condition *now = find(id(weather_condition).state);
                 id(weather_valid) = now != nullptr;
-                id(weather_tint) = now ? now->tint : 0x101820;
+                id(weather_tint) = now ? now->tint : ${color_background};
                 float temp = id(weather_temperature).state;
                 std::string temp_text = std::isnan(temp) ? std::string("--") : str_sprintf("%.0f°", temp);
                 const char *icon = now ? now->icon : "\U0000f15c";
@@ -1798,6 +1828,21 @@ script:
                   lv_obj_set_style_text_color(icons[i], lv_color_hex(c ? c->color : 0xB0BEC5), LV_PART_MAIN);
                   lv_label_set_text(temps[i], id(fc_temp)[i].c_str());
                   lv_obj_remove_flag(cols[i], LV_OBJ_FLAG_HIDDEN);
+                }
+
+                // Uitleg als er geen weer of geen verwachting is
+                const char *hint = nullptr;
+                if (now == nullptr && id(forecast_state) != 0)
+                  hint = "Geen weer gevonden.\nControleer weather_entity\n(${weather_entity}).";
+                else if (id(fc_count) == 0 && id(forecast_state) == 2)
+                  hint = "Voor de verwachting: zet in Home Assistant bij dit apparaat 'acties uitvoeren' aan.";
+                else if (id(fc_count) == 0)
+                  hint = "Verwachting laden...";
+                if (hint != nullptr) {
+                  lv_label_set_text(id(wx_hint), hint);
+                  lv_obj_remove_flag(id(wx_hint), LV_OBJ_FLAG_HIDDEN);
+                } else {
+                  lv_obj_add_flag(id(wx_hint), LV_OBJ_FLAG_HIDDEN);
                 }
             - lvgl.widget.update:
                 id: tile_weather
@@ -2018,8 +2063,6 @@ script:
                   - lvgl.widget.update:
                       id: btn_talk
                       bg_color: ${color_muted}
-                      bg_grad_color: ${color_muted}
-                      shadow_color: ${color_muted}
                   - lvgl.label.update:
                       id: lbl_talk_icon
                       text: "\U0000e02b"
@@ -2034,14 +2077,10 @@ script:
                         - lvgl.widget.update:
                             id: btn_talk
                             bg_color: ${color_listening}
-                            bg_grad_color: ${color_listening_dark}
-                            shadow_color: ${color_listening}
                       else:
                         - lvgl.widget.update:
                             id: btn_talk
                             bg_color: ${color_idle}
-                            bg_grad_color: ${color_idle}
-                            shadow_color: ${color_idle}
                   - lvgl.label.update:
                       id: lbl_talk_icon
                       text: "\U0000e31d"

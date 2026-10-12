@@ -208,7 +208,8 @@ script:
             - light.turn_off: backlight
             - delay: 500ms
             - lvgl.pause:
-      # Na het dimmen terug naar de Home-pagina.
+      # Na nog 2 minuten zonder aanraking terug naar de Home-pagina.
+      - delay: 2min
       - lvgl.tileview.select:
           id: tiles
           column: 1

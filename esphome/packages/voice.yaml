@@ -53,6 +53,21 @@ micro_wake_word:
           - voice_assistant.start:
               wake_word: !lambda return wake_word;
 
+# Microfoonniveau in Home Assistant (apparaatpagina > Diagnostiek), handig om
+# te zien of de microfoon geluid oppikt. Meet alleen als de microfoon al aan
+# staat (wake word of gesprek). Stil is ongeveer -70 dB, praten -40 tot -20 dB.
+sensor:
+  - platform: sound_level
+    microphone: mic_in
+    passive: true
+    measurement_duration: 2s
+    peak:
+      name: Microfoon piek
+      entity_category: diagnostic
+    rms:
+      name: Microfoon niveau
+      entity_category: diagnostic
+
 media_player:
   - platform: speaker
     id: speaker_media_player
