@@ -232,6 +232,12 @@ sequence:
   of probeer een ander wake word. "Okay Nabu" werkt meestal het best.
 - **De config wordt niet geaccepteerd.** Werk de ESPHome Device Builder bij naar
   2026.9 of nieuwer.
+- **Bouwen stopt met `Killed signal terminated program cc1plus`.** Je Home
+  Assistant-computer heeft te weinig werkgeheugen om meerdere bestanden
+  tegelijk te compileren. Zet onder `esphome:` de regel
+  `compile_process_limit: 1` (staat al in de complete bestanden) en klik
+  opnieuw op *Install*; wat al gebouwd was, wordt hergebruikt. Stop eventueel
+  tijdelijk zware add-ons.
 
 ## Bestanden
 

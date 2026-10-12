@@ -73,6 +73,11 @@ esphome:
         - delay: 30s
         - lambda: id(init_in_progress) = false;
         - script.execute: update_ui
+  # Compileer één bestand tegelijk, zodat een Home Assistant-computer met
+  # weinig geheugen (bijv. een Raspberry Pi) niet vastloopt met
+  # "Killed signal terminated program cc1plus". Duurt de eerste keer langer;
+  # op een snelle computer mag deze regel weg.
+  compile_process_limit: 1
 
 esp32:
   board: esp32-s3-devkitc-1
